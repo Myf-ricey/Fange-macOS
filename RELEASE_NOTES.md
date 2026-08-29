@@ -13,5 +13,4 @@
 
 ## 安装提醒
 
-当前版本为 ad-hoc 签名，尚未完成 Apple Developer ID 公证。首次启动请右键 App 选择“打开”，无需关闭 Gatekeeper。使用吸附和自动整理时，需要允许饭格控制 Finder。
-
+当前版本为 ad-hoc 签名，尚未完成 Apple Developer ID 签名与公证。首次双击后如被阻止，请前往“系统设置 → 隐私与安全性”，点按“仍要打开”并确认一次，无需关闭 Gatekeeper。使用吸附和自动整理时，需要允许饭格控制 Finder。

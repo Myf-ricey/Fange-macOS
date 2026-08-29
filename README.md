@@ -58,7 +58,7 @@ Fange-v0.1.0-macOS-universal.zip
 
 1. 从 Releases 下载 ZIP 并解压。
 2. 把“饭格.app”拖入“应用程序”。
-3. 当前 Beta 尚未完成 Apple Developer ID 公证。首次启动请在 Finder 中右键“饭格.app”，选择“打开”，再确认一次“打开”。不要关闭 Gatekeeper，也不需要运行解除安全限制的命令。
+3. 当前 Beta 尚未完成 Apple Developer ID 签名与公证。首次双击时若 macOS 阻止启动，请在尝试启动后前往“系统设置 → 隐私与安全性”，向下滚动到“安全性”，点按饭格旁的“仍要打开”，再确认一次“打开”。系统记住这次选择后，之后即可正常双击启动。不要关闭 Gatekeeper，也不需要运行解除安全限制的命令。
 4. 首次整理图标时，macOS 会询问是否允许饭格控制 Finder，请选择允许。
 
 更详细的安装和权限说明见 [安装指南](docs/INSTALL.md)。
