@@ -4,7 +4,7 @@
   <img src="assets/fange-icon.png" width="168" alt="饭格 App 图标">
 </p>
 
-<p align="center"><strong>桌面清爽，做事顺手。</strong></p>
+<p align="center"><strong>桌面有格，效率无界。</strong></p>
 
 <p align="center">原生 macOS 桌面分区整理工具 · 全功能免费 · 闭源发布</p>
 
