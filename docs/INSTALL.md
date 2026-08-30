@@ -7,8 +7,8 @@
 
 ## 安装
 
-1. 打开项目的 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.1.0-beta)。
-2. 下载 `Fange-v0.1.0-macOS-universal.zip`。
+1. 打开项目的 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.1.0-beta.2)。
+2. 下载 `Fange-v0.1.0-beta.2-macOS-universal.zip`。
 3. 解压 ZIP，把“饭格.app”拖入“应用程序”。
 
 ## 当前 Beta 的首次打开方式
@@ -26,7 +26,7 @@
 
 ## Finder 自动化权限
 
-首次吸附或自动整理时，允许饭格控制 Finder。权限入口通常位于：
+首次使用吸附功能时，允许饭格控制 Finder。权限入口通常位于：
 
 ```text
 系统设置 → 隐私与安全性 → 自动化 → 饭格 → Finder

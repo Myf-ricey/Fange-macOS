@@ -6,11 +6,11 @@
 
 <p align="center"><strong>桌面有格，效率无界。</strong></p>
 
-<p align="center">原生 macOS 桌面分区整理工具 · 全功能免费 · 闭源发布</p>
+<p align="center">原生 macOS 桌面分区整理工具 · 全功能免费 · Apache-2.0 开源</p>
 
 饭格在 Finder 桌面图标下方创建可自由定制的整理分区。文件仍然由 Finder 管理，照常双击、拖动和打开；饭格只负责让图标归位，让桌面更清楚、更顺手。
 
-> 当前版本：`0.1.0 Beta`。全部功能免费，无广告、无账号、无订阅。
+> 当前版本：`0.1.0 Beta 2`。全部功能免费，无广告、无账号、无订阅；源代码允许个人和企业使用、修改与商用。
 
 <p align="center">
   <img src="assets/poster.png" width="640" alt="饭格核心功能海报">
@@ -18,10 +18,10 @@
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.1.0-beta) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.1.0-beta/Fange-v0.1.0-macOS-universal.zip)：
+前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.1.0-beta.2) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.1.0-beta.2/Fange-v0.1.0-beta.2-macOS-universal.zip)：
 
 ```text
-Fange-v0.1.0-macOS-universal.zip
+Fange-v0.1.0-beta.2-macOS-universal.zip
 ```
 
 支持 Apple Silicon 与 Intel Mac，系统要求 macOS 13 Ventura 或更高版本。
@@ -71,13 +71,35 @@ Fange-v0.1.0-macOS-universal.zip
 
 完整说明见 [使用指南](docs/USER_GUIDE.md)。
 
+## 从源码构建
+
+需要 macOS 13 或更高版本，以及已安装 Swift 编译器的 Xcode Command Line Tools：
+
+```sh
+git clone https://github.com/Myf-ricey/Fange-macOS.git
+cd Fange-macOS
+./test-drag.sh
+./test-single-instance.sh
+./build.sh
+open DesktopRegions.app
+```
+
+源码构建版不包含饭格官方 App 图标和图片字标，会使用系统默认图标与文字标题；这不影响功能。官方品牌资源只包含在 GitHub Releases 的官方构建中。
+
 ## 隐私
 
 饭格不联网，不收集分析数据，不上传文件。它只在本机读取 Finder 桌面图标的位置和路径，并把分区设置保存在本地。详见 [隐私说明](PRIVACY.md)。
 
-## 源代码与许可
+## 开源许可
 
-饭格目前采用闭源发布。GitHub 仓库用于提供官方下载、版本说明和问题反馈，不包含源代码。用户可以免费下载安装官方二进制，但不能修改、重新打包、转售或冒充官方版本。详见 [专有软件许可](LICENSE.md)。
+源码、测试、构建脚本和文本说明采用 [Apache License 2.0](LICENSE)：
+
+- 允许个人与企业使用、修改、商用和再发布；
+- 允许把修改后的代码用于闭源商业产品，不强制公开衍生产品源码；
+- 再发布时必须保留许可证、版权和 NOTICE，并标明对原文件所作的修改；
+- 许可证包含明确的专利授权，但不授予饭格品牌使用权。
+
+“饭格 / Fange”名称、官方图标、字标、海报与宣传图不在 Apache-2.0 授权范围内。分叉版本公开发布前须更换品牌元素，详见 [品牌与视觉资产说明](BRAND_ASSETS.md)。参与开发见 [贡献指南](CONTRIBUTING.md)。
 
 ## 反馈
 
