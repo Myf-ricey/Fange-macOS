@@ -15,6 +15,8 @@
 ```sh
 ./test-drag.sh
 ./test-single-instance.sh
+./test-folders.sh
+./test-updates.sh  # 需要 Keka
 ./build.sh
 ```
 

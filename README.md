@@ -8,9 +8,9 @@
 
 <p align="center">原生 macOS 桌面分区整理工具 · 全功能免费 · Apache-2.0 开源</p>
 
-饭格在 Finder 桌面图标下方创建可自由定制的整理分区。文件仍然由 Finder 管理，照常双击、拖动和打开；饭格只负责让图标归位，让桌面更清楚、更顺手。
+饭格让桌面图标整齐归位，也能把真实文件夹映射到桌面分区。支持大图标、列表、展开收起和独立排序，照常双击打开文件、拖动整理。
 
-> 当前版本：`0.1.0 Beta 2`。全部功能免费，无广告、无账号、无订阅；源代码允许个人和企业使用、修改与商用。
+> 当前版本：`0.2.4 Beta`。全部功能免费，无广告、无账号、无订阅；源代码允许个人和企业使用、修改与商用。
 
 <p align="center">
   <img src="assets/poster.png" width="640" alt="饭格核心功能海报">
@@ -18,10 +18,10 @@
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.1.0-beta.2) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.1.0-beta.2/Fange-v0.1.0-beta.2-macOS-universal.zip)：
+前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.2.4) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.2.4/Fange-v0.2.4-macOS-universal.zip)：
 
 ```text
-Fange-v0.1.0-beta.2-macOS-universal.zip
+Fange-v0.2.4-macOS-universal.zip
 ```
 
 支持 Apple Silicon 与 Intel Mac，系统要求 macOS 13 Ventura 或更高版本。
@@ -30,7 +30,7 @@ Fange-v0.1.0-beta.2-macOS-universal.zip
 
 ### 界面简洁
 
-分区位于 Finder 图标下方，不替换图标、不创建隐藏文件夹，也不改变熟悉的桌面操作方式。
+普通分区整理桌面图标，映射分区显示你选择的真实文件夹。可收起分区由饭格绘制图标，并临时隐藏对应 Finder 原图标；退出时恢复显示。文件位置由 Finder 和文件系统管理。
 
 ### 风格自由
 
@@ -47,7 +47,10 @@ Fange-v0.1.0-beta.2-macOS-universal.zip
 - 把桌面图标拖入分区，松手后自动吸附到最近空位。
 - 图标与分区保持绑定，移动或缩放分区后仍会整齐归位。
 - 分区大小、位置、数量、行列和图标间距都可自由调整。
-- 常驻菜单栏，可选择登录时自动启动。
+- 把真实文件夹映射到分区，内容实时同步，拖入文件会实际移入该文件夹。
+- 分区支持展开收起、大图标与列表展示，内容较多时可滚动浏览。
+- 映射分区与列表分区可按名称、时间、大小或类型独立排序。
+- 常驻菜单栏，可选择登录时自动启动；每次启动检查 GitHub 更新，也可手动检查并一键更新。
 
 ### 全功能免费
 
@@ -67,7 +70,9 @@ Fange-v0.1.0-beta.2-macOS-universal.zip
 1. 启动饭格，点击菜单栏饭碗图标打开设置。
 2. 在普通模式下，把 Finder 桌面图标拖入分区即可吸附。
 3. 开启“编辑模式”，可拖动分区或从右下角调整大小。
-4. 使用 `+` 新建分区，通过“更多”调整材质、标题、行列和间距。
+4. 使用 `+` 新建分区，点击灰色文件夹按钮选择要映射的文件夹。
+5. 设置窗口可切换大图标或列表，以及是否允许收起。排序入口在该分区的 `… → 文件排序`。
+6. 菜单栏“检查更新…”可下载、验证并覆盖安装新版本。
 
 完整说明见 [使用指南](docs/USER_GUIDE.md)。
 
@@ -80,6 +85,8 @@ git clone https://github.com/Myf-ricey/Fange-macOS.git
 cd Fange-macOS
 ./test-drag.sh
 ./test-single-instance.sh
+./test-folders.sh
+./test-updates.sh  # 安装包测试需要 Keka
 ./build.sh
 open DesktopRegions.app
 ```
@@ -88,7 +95,7 @@ open DesktopRegions.app
 
 ## 隐私
 
-饭格不联网，不收集分析数据，不上传文件。它只在本机读取 Finder 桌面图标的位置和路径，并把分区设置保存在本地。详见 [隐私说明](PRIVACY.md)。
+饭格在本机处理桌面和映射文件夹，不收集分析数据，不上传文件、路径或配置。检查与下载更新时会连接本项目的 GitHub Releases。详见 [隐私说明](PRIVACY.md)。
 
 ## 开源许可
 

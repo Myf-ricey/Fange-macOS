@@ -36,6 +36,7 @@ struct WorkspaceSnapshot: Equatable {
 struct WorkspaceUndoStep: Equatable {
     let title: String
     let snapshot: WorkspaceSnapshot
+    var fileMoves: [FileMove] = []
 }
 
 struct WorkspaceUndoHistory {
@@ -48,9 +49,9 @@ struct WorkspaceUndoHistory {
 
     var nextStep: WorkspaceUndoStep? { steps.last }
 
-    mutating func record(title: String, snapshot: WorkspaceSnapshot) {
-        guard steps.last?.snapshot != snapshot else { return }
-        steps.append(WorkspaceUndoStep(title: title, snapshot: snapshot))
+    mutating func record(title: String, snapshot: WorkspaceSnapshot, fileMoves: [FileMove] = []) {
+        guard !fileMoves.isEmpty || steps.last?.snapshot != snapshot else { return }
+        steps.append(WorkspaceUndoStep(title: title, snapshot: snapshot, fileMoves: fileMoves))
         if steps.count > limit {
             steps.removeFirst(steps.count - limit)
         }

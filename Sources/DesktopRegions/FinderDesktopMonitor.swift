@@ -79,6 +79,9 @@ struct FinderProgrammaticMoveTracker {
 
 final class FinderDesktopMonitor {
     var isEnabled = true
+    // Bound entries can disappear while collapsed/listed and reappear after
+    // UF_HIDDEN is restored. Their appearance is not a new desktop drop.
+    var boundDesktopPaths = Set<String>()
     var onSelectedItemsMoved: (([FinderDesktopItem], [FinderDesktopItem]) -> Void)?
     var onSnapshotUpdated: (([FinderDesktopItem], Set<String>) -> Void)?
     private(set) var currentItems: [FinderDesktopItem] = []
@@ -224,7 +227,8 @@ final class FinderDesktopMonitor {
             current: snapshot.itemsByPath,
             selectedPaths: snapshot.selectedPaths,
             trackedMovementPaths: trackedMovementPaths,
-            ignoredMovementPaths: fulfilledProgrammaticPaths
+            ignoredMovementPaths: fulfilledProgrammaticPaths,
+            ignoredAppearancePaths: boundDesktopPaths
         )
         self.previousItemsByPath = snapshot.itemsByPath
         programmaticMoveTracker.consume(fulfilledProgrammaticPaths)
@@ -260,7 +264,8 @@ enum FinderDesktopPollEventPipeline {
         current: [String: FinderDesktopItem],
         selectedPaths: Set<String>,
         trackedMovementPaths: Set<String>,
-        ignoredMovementPaths: Set<String> = []
+        ignoredMovementPaths: Set<String> = [],
+        ignoredAppearancePaths: Set<String> = []
     ) -> [FinderDesktopPollEvent] {
         let currentItems = current.values.sorted { $0.url.path < $1.url.path }
         let changedItems = FinderDesktopChangeDetector.changedItems(
@@ -268,7 +273,8 @@ enum FinderDesktopPollEventPipeline {
             current: current,
             selectedPaths: selectedPaths,
             trackedMovementPaths: trackedMovementPaths,
-            ignoredMovementPaths: ignoredMovementPaths
+            ignoredMovementPaths: ignoredMovementPaths,
+            ignoredAppearancePaths: ignoredAppearancePaths
         )
         var events: [FinderDesktopPollEvent] = []
         if !changedItems.isEmpty {
@@ -290,13 +296,17 @@ enum FinderDesktopChangeDetector {
         current: [String: FinderDesktopItem],
         selectedPaths: Set<String>,
         trackedMovementPaths: Set<String> = [],
-        ignoredMovementPaths: Set<String> = []
+        ignoredMovementPaths: Set<String> = [],
+        ignoredAppearancePaths: Set<String> = []
     ) -> [FinderDesktopItem] {
         current.compactMap { path, item in
-            // A file dragged from a Finder window onto the Desktop is not always
-            // left selected. Treat every newly appearing desktop item as a drop.
-            guard let oldItem = previous[path] else { return item }
             guard !ignoredMovementPaths.contains(path) else { return nil }
+            // A file dragged from a Finder window onto the Desktop is not always
+            // left selected. Only unbound appearances are fresh drops; an
+            // existing binding owns its slot through hide/show transitions.
+            guard let oldItem = previous[path] else {
+                return ignoredAppearancePaths.contains(path) ? nil : item
+            }
             let isUserMovement = selectedPaths.contains(path) || trackedMovementPaths.contains(path)
             guard isUserMovement, oldItem.position != item.position else { return nil }
             return item
@@ -312,7 +322,7 @@ private enum FinderDesktopReader {
             set selectedItems to selection
             repeat with selectedItem in selectedItems
                 try
-                    set output to output & "S" & tab & (POSIX path of (selectedItem as alias)) & linefeed
+                    set output to output & "S" & tab & (URL of selectedItem) & linefeed
                 end try
             end repeat
             set desktopItems to every item of desktop

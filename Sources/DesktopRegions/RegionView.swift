@@ -15,6 +15,7 @@ final class RegionView: NSView {
     var editMode = false {
         didSet { needsDisplay = true }
     }
+    var drawsMoreIndicator = true
     var onFrameChanged: ((NSRect) -> Void)?
     var onLiveFrameChanged: ((NSRect) -> Void)?
     var onFilesDropped: (([URL], NSPoint) -> Void)?
@@ -24,6 +25,7 @@ final class RegionView: NSView {
     var onInteractionMouseMoved: ((NSPoint) -> Void)?
     var onFileDragPreviewChanged: ((Bool, NSPoint?) -> Void)?
     private let rendersVisuals: Bool
+    private var snapsToMacGrid: Bool { region.usesMacDefaultGrid && !region.presentsOwnFiles }
 
     private var gesture: Gesture?
     private var dragStart: NSPoint?
@@ -32,7 +34,6 @@ final class RegionView: NSView {
     private var finderDragPreviewActive = false
     private var availableSlotIndices = Set<Int>()
     private var hoveredSlotIndex: Int?
-    private var feedbackWorkItem: DispatchWorkItem?
     private var pendingMacGridFrame: NSRect?
     private var pointerTrackingArea: NSTrackingArea?
 
@@ -46,6 +47,16 @@ final class RegionView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if editMode, !snapsToMacGrid, !region.isCollapsed,
+           RegionLayout.resizeHitRect(in: bounds).contains(local) {
+            // File rows and the scroller must not steal a resize gesture.
+            return self
+        }
+        return super.hitTest(point)
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -114,16 +125,18 @@ final class RegionView: NSView {
         let titleRect = RegionLayout.titleTextRect(
             in: headerRect,
             titleHeight: titleHeight,
-            editMode: editMode
+            editMode: editMode || region.allowsCollapse
         )
         (region.name as NSString).draw(in: titleRect, withAttributes: titleAttributes)
 
         if editMode {
-            drawMoreIndicator(
-                in: moreIndicatorRect(headerRect: headerRect),
-                color: NSColor(hex: region.titleColorHex)
-            )
-            if !region.usesMacDefaultGrid {
+            if drawsMoreIndicator {
+                drawMoreIndicator(
+                    in: moreIndicatorRect(headerRect: headerRect),
+                    color: NSColor(hex: region.titleColorHex)
+                )
+            }
+            if !snapsToMacGrid && !region.isCollapsed {
                 drawResizeIndicator()
             }
         }
@@ -137,9 +150,9 @@ final class RegionView: NSView {
             onMoreRequested?()
             return
         }
-        gesture = region.usesMacDefaultGrid
+        gesture = (snapsToMacGrid || region.isCollapsed)
             ? .move
-            : ((point.x > bounds.maxX - 48 && point.y < 48) ? .resize : .move)
+            : (RegionLayout.resizeHitRect(in: bounds).contains(point) ? .resize : .move)
         dragStart = RegionGestureGeometry.globalPoint(
             windowFrame: window.frame,
             eventLocationInWindow: event.locationInWindow
@@ -183,7 +196,7 @@ final class RegionView: NSView {
 
         window.setFrame(newFrame, display: true)
         onLiveFrameChanged?(newFrame)
-        if region.usesMacDefaultGrid {
+        if snapsToMacGrid {
             let wantsTop = prefersTopOverflow(
                 dragStart: dragStart,
                 current: current,
@@ -200,7 +213,7 @@ final class RegionView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         guard editMode else { return }
-        let finalMacFrame = region.usesMacDefaultGrid ? pendingMacGridFrame : nil
+        let finalMacFrame = snapsToMacGrid ? pendingMacGridFrame : nil
         gesture = nil
         dragStart = nil
         frameAtDragStart = nil
@@ -257,6 +270,7 @@ final class RegionView: NSView {
     }
 
     func setAvailableSlots(_ indices: Set<Int>) {
+        guard availableSlotIndices != indices else { return }
         availableSlotIndices = indices
         needsDisplay = true
     }
@@ -278,15 +292,12 @@ final class RegionView: NSView {
     }
 
     func showDropFeedback() {
-        feedbackWorkItem?.cancel()
-        isDropTarget = true
+        // End the live placement preview without a second 0.45-second skeleton
+        // flash. The files themselves are the completed-drop feedback.
+        isDropTarget = false
+        finderDragPreviewActive = false
+        hoveredSlotIndex = nil
         needsDisplay = true
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.isDropTarget = false
-            self?.needsDisplay = true
-        }
-        feedbackWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: workItem)
     }
 
     private func moreIndicatorRect(headerRect: NSRect) -> NSRect {
@@ -1092,6 +1103,7 @@ final class RegionView: NSView {
     }
 
     private func drawAvailableSlots() {
+        guard !region.presentsOwnFiles, !region.isCollapsed else { return }
         let centers = RegionLayout.globalSlotCenters(in: region)
         for index in availableSlotIndices.sorted() where centers.indices.contains(index) {
             let center = centers[index]
@@ -1165,7 +1177,7 @@ final class RegionView: NSView {
         current: NSPoint,
         proposedFrame: NSRect
     ) -> Bool {
-        guard region.usesMacDefaultGrid else { return false }
+        guard snapsToMacGrid else { return false }
         let screen = NSScreen.screens.first { $0.frame.contains(current) }
             ?? NSScreen.main
             ?? NSScreen.screens.first

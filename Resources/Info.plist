@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.4</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>7</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSApplicationCategoryType</key>
@@ -25,7 +25,13 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>饭格需要控制 Finder 来重新摆放桌面图标，但不会移动或修改文件。</string>
+	<string>饭格需要控制 Finder 来重新摆放桌面图标。映射分区会显示所选文件夹，并将拖入的文件移动到该文件夹。</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>饭格需要访问桌面，以整理图标并把拖入映射分区的文件移入所选文件夹。</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>饭格需要访问你选择的映射文件夹，以显示和移动其中的文件。</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>饭格需要访问你选择的映射文件夹，以显示和移动其中的文件。</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>

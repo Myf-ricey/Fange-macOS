@@ -12,8 +12,8 @@ enum DesktopArranger {
             guard url.deletingLastPathComponent().path == desktopPath,
                   FileManager.default.fileExists(atPath: url.path)
             else { return nil }
-            let path = appleScriptString(url.path)
-            return "set theItem to (POSIX file \"\(path)\" as alias)\nset desktop position of theItem to {\(Int(item.position.x)), \(Int(item.position.y))}"
+            let path = appleScriptString(url.lastPathComponent)
+            return "set theItem to item \"\(path)\" of desktop\nset desktop position of theItem to {\(Int(item.position.x)), \(Int(item.position.y))}"
         }
         guard !commands.isEmpty else { return nil }
         let source = "tell application \"Finder\"\n" + commands.joined(separator: "\n") + "\nend tell"
@@ -57,9 +57,9 @@ enum DesktopArranger {
         }
 
         let commands = pairs.map { url, slotIndex -> String in
-            let path = appleScriptString(url.standardizedFileURL.path)
+            let path = appleScriptString(url.lastPathComponent)
             let point = positions[slotIndex]
-            return "set theItem to (POSIX file \"\(path)\" as alias)\nset desktop position of theItem to {\(point.x), \(point.y)}"
+            return "set theItem to item \"\(path)\" of desktop\nset desktop position of theItem to {\(point.x), \(point.y)}"
         }
         let source = "tell application \"Finder\"\n" + commands.joined(separator: "\n") + "\nend tell"
         return execute(source)
@@ -100,9 +100,9 @@ enum DesktopArranger {
         }
         var commands: [String] = []
         for (index, url) in desktopItems.enumerated() {
-            let path = appleScriptString(url.standardizedFileURL.path)
+            let path = appleScriptString(url.lastPathComponent)
             let point = positions[index]
-            commands.append("set theItem to (POSIX file \"\(path)\" as alias)\nset desktop position of theItem to {\(point.x), \(point.y)}")
+            commands.append("set theItem to item \"\(path)\" of desktop\nset desktop position of theItem to {\(point.x), \(point.y)}")
         }
 
         let source = "tell application \"Finder\"\n" + commands.joined(separator: "\n") + "\nend tell"
@@ -125,12 +125,21 @@ enum DesktopArranger {
         }
         _ = script.executeAndReturnError(&error)
         if let error {
-            let description = error[NSAppleScript.errorAppName] as? String
-                ?? error[NSAppleScript.errorMessage] as? String
-                ?? "Finder 未能完成桌面图标整理。"
-            return NSError(domain: "DesktopRegions", code: 1002, userInfo: [NSLocalizedDescriptionKey: description])
+            return finderError(error)
         }
         return nil
+    }
+
+    // Refer to the desktop entry itself: coercing a POSIX path to alias
+    // follows symbolic links and attempts to position the application target.
+    static func finderError(_ details: NSDictionary) -> NSError {
+        let message = (details[NSAppleScript.errorMessage] as? String)
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "Finder 未能完成桌面图标整理。"
+        let code = (details[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 1002
+        return NSError(domain: "DesktopRegions.Finder", code: code, userInfo: [
+            NSLocalizedDescriptionKey: "桌面图标定位失败：\(message)（错误码：\(code)）",
+            NSUnderlyingErrorKey: NSError(domain: NSOSStatusErrorDomain, code: code)
+        ])
     }
 
     private static func appleScriptString(_ path: String) -> String {

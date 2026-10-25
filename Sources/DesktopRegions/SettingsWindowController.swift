@@ -11,7 +11,10 @@ private final class EdgeTabPanel: NSPanel {
 private enum SettingsTableLayout {
     static let duplicateWidth: CGFloat = 52
     static let colorWidth: CGFloat = 76
-    static let opacityWidth: CGFloat = 254
+    static let opacityWidth: CGFloat = 214
+    static let mappingWidth: CGFloat = 76
+    static let collapseWidth: CGFloat = 76
+    static let viewWidth: CGFloat = 100
     static let moreWidth: CGFloat = 64
 
     static func frames(in bounds: NSRect) -> (
@@ -19,18 +22,24 @@ private enum SettingsTableLayout {
         color: NSRect,
         name: NSRect,
         opacity: NSRect,
+        mapping: NSRect,
+        collapse: NSRect,
+        view: NSRect,
         more: NSRect
     ) {
         let nameWidth = max(
             190,
-            bounds.width - duplicateWidth - colorWidth - opacityWidth - moreWidth
+            bounds.width - duplicateWidth - colorWidth - opacityWidth - moreWidth - mappingWidth - collapseWidth - viewWidth
         )
         let duplicate = NSRect(x: 0, y: 0, width: duplicateWidth, height: bounds.height)
         let color = NSRect(x: duplicate.maxX, y: 0, width: colorWidth, height: bounds.height)
         let name = NSRect(x: color.maxX, y: 0, width: nameWidth, height: bounds.height)
         let opacity = NSRect(x: name.maxX, y: 0, width: opacityWidth, height: bounds.height)
-        let more = NSRect(x: opacity.maxX, y: 0, width: moreWidth, height: bounds.height)
-        return (duplicate, color, name, opacity, more)
+        let mapping = NSRect(x: opacity.maxX, y: 0, width: mappingWidth, height: bounds.height)
+        let collapse = NSRect(x: mapping.maxX, y: 0, width: collapseWidth, height: bounds.height)
+        let view = NSRect(x: collapse.maxX, y: 0, width: viewWidth, height: bounds.height)
+        let more = NSRect(x: view.maxX, y: 0, width: moreWidth, height: bounds.height)
+        return (duplicate, color, name, opacity, mapping, collapse, view, more)
     }
 }
 
@@ -39,13 +48,16 @@ private final class SettingsTableHeaderView: NSView {
     private let colorLabel = NSTextField(labelWithString: "颜色")
     private let nameLabel = NSTextField(labelWithString: "分区名")
     private let opacityLabel = NSTextField(labelWithString: "透明 / 着色")
+    private let mappingLabel = NSTextField(labelWithString: "映射文件夹")
+    private let collapseLabel = NSTextField(labelWithString: "允许收起")
+    private let viewLabel = NSTextField(labelWithString: "显示方式")
     private let moreLabel = NSTextField(labelWithString: "更多")
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72).cgColor
-        [duplicateLabel, colorLabel, nameLabel, opacityLabel, moreLabel].forEach {
+        [duplicateLabel, colorLabel, nameLabel, opacityLabel, mappingLabel, collapseLabel, viewLabel, moreLabel].forEach {
             $0.alignment = .center
             $0.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
             $0.textColor = .secondaryLabelColor
@@ -64,6 +76,9 @@ private final class SettingsTableHeaderView: NSView {
         colorLabel.frame = columns.color.insetBy(dx: 4, dy: 10)
         nameLabel.frame = columns.name.insetBy(dx: 4, dy: 10)
         opacityLabel.frame = columns.opacity.insetBy(dx: 4, dy: 10)
+        mappingLabel.frame = columns.mapping.insetBy(dx: 2, dy: 10)
+        collapseLabel.frame = columns.collapse.insetBy(dx: 2, dy: 10)
+        viewLabel.frame = columns.view.insetBy(dx: 2, dy: 10)
         moreLabel.frame = columns.more.insetBy(dx: 4, dy: 10)
     }
 }
@@ -75,6 +90,9 @@ final class RegionRowView: NSView {
     private let colorWell = NSColorWell()
     private let opacitySlider = NSSlider(value: 0.26, minValue: 0.12, maxValue: 0.70, target: nil, action: nil)
     private let opacityStepper = NSStepper()
+    private let mappingButton = NSButton()
+    private let collapseCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let displayPopup = NSPopUpButton()
     private let moreButton = NSButton()
     private let separator = NSBox()
 
@@ -84,6 +102,9 @@ final class RegionRowView: NSView {
     private var onColorChanged: ((UUID, String) -> Void)?
     private var onOpacityChanged: ((UUID, Double) -> Void)?
     private var onMore: ((UUID) -> Void)?
+    private var onMapping: ((UUID, NSView) -> Void)?
+    private var onCollapseAllowed: ((UUID, Bool) -> Void)?
+    private var onDisplayMode: ((UUID, RegionDisplayMode) -> Void)?
     private var onDelete: ((UUID) -> Void)?
     private var isDeleteMode = false
 
@@ -94,7 +115,10 @@ final class RegionRowView: NSView {
         onColorChanged: @escaping (UUID, String) -> Void,
         onOpacityChanged: @escaping (UUID, Double) -> Void,
         onMore: @escaping (UUID) -> Void,
-        onDelete: @escaping (UUID) -> Void
+        onDelete: @escaping (UUID) -> Void,
+        onMapping: @escaping (UUID, NSView) -> Void,
+        onCollapseAllowed: @escaping (UUID, Bool) -> Void,
+        onDisplayMode: @escaping (UUID, RegionDisplayMode) -> Void
     ) {
         regionID = region.id
         currentName = region.name
@@ -104,6 +128,9 @@ final class RegionRowView: NSView {
         self.onOpacityChanged = onOpacityChanged
         self.onMore = onMore
         self.onDelete = onDelete
+        self.onMapping = onMapping
+        self.onCollapseAllowed = onCollapseAllowed
+        self.onDisplayMode = onDisplayMode
         super.init(frame: .zero)
 
         duplicateButton.image = NSImage(
@@ -152,6 +179,20 @@ final class RegionRowView: NSView {
         opacityStepper.action = #selector(opacityStepped)
         updateOpacitySemantics(for: region)
 
+        mappingButton.bezelStyle = .inline
+        mappingButton.isBordered = false
+        mappingButton.imagePosition = .imageOnly
+        mappingButton.target = self
+        mappingButton.action = #selector(mappingPressed)
+        collapseCheckbox.target = self
+        collapseCheckbox.action = #selector(collapseAllowedChanged)
+        collapseCheckbox.toolTip = "在分区左上角显示展开 / 收起按钮"
+        displayPopup.addItems(withTitles: RegionDisplayMode.allCases.map(\.displayName))
+        displayPopup.controlSize = .small
+        displayPopup.target = self
+        displayPopup.action = #selector(displayModeChanged)
+        updateFileControls(region)
+
         moreButton.bezelStyle = .inline
         moreButton.isBordered = false
         moreButton.imagePosition = .imageOnly
@@ -160,7 +201,7 @@ final class RegionRowView: NSView {
         setDeleteMode(false)
 
         separator.boxType = .separator
-        [duplicateButton, colorWell, nameField, opacitySlider, opacityStepper, moreButton, separator]
+        [duplicateButton, colorWell, nameField, opacitySlider, opacityStepper, mappingButton, collapseCheckbox, displayPopup, moreButton, separator]
             .forEach(addSubview)
     }
 
@@ -192,6 +233,9 @@ final class RegionRowView: NSView {
             width: max(80, opacityContent.width - 34),
             height: opacityContent.height
         )
+        mappingButton.frame = NSRect(x: columns.mapping.midX - 17, y: bounds.midY - 15, width: 34, height: 30)
+        collapseCheckbox.frame = NSRect(x: columns.collapse.midX - 9, y: bounds.midY - 10, width: 20, height: 20)
+        displayPopup.frame = NSRect(x: columns.view.minX + 5, y: bounds.midY - 13, width: columns.view.width - 10, height: 26)
         moreButton.frame = NSRect(x: columns.more.midX - 18, y: bounds.midY - 16, width: 36, height: 32)
         separator.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
     }
@@ -206,7 +250,21 @@ final class RegionRowView: NSView {
         opacitySlider.doubleValue = region.opacity
         opacityStepper.doubleValue = region.opacity
         updateOpacitySemantics(for: region)
+        updateFileControls(region)
     }
+
+    private func updateFileControls(_ region: Region) {
+        mappingButton.image = NSImage(systemSymbolName: region.isMapped ? "folder.fill.badge.gearshape" : "folder",
+                                      accessibilityDescription: region.isMapped ? "已映射文件夹" : "选择映射文件夹")
+        mappingButton.contentTintColor = region.isMapped ? .systemBlue : .systemGray
+        mappingButton.toolTip = region.mappedFolderPath.map { "已映射：\($0)\n点击更换、打开或解除映射；排序在“更多”设置中调整" } ?? "未映射：点击选择真实文件夹"
+        collapseCheckbox.state = region.allowsCollapse ? .on : .off
+        displayPopup.selectItem(at: RegionDisplayMode.allCases.firstIndex(of: region.displayMode) ?? 0)
+    }
+
+    @objc private func mappingPressed() { onMapping?(regionID, mappingButton) }
+    @objc private func collapseAllowedChanged() { onCollapseAllowed?(regionID, collapseCheckbox.state == .on) }
+    @objc private func displayModeChanged() { onDisplayMode?(regionID, RegionDisplayMode.allCases[displayPopup.indexOfSelectedItem]) }
 
     private func updateOpacitySemantics(for region: Region) {
         let description = region.surfaceStyle.isPaper
@@ -225,7 +283,7 @@ final class RegionRowView: NSView {
         } else {
             moreButton.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "更多")
             moreButton.contentTintColor = .secondaryLabelColor
-            moreButton.toolTip = "更多设置"
+            moreButton.toolTip = "外观、网格与文件排序"
         }
     }
 
@@ -326,7 +384,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     init(appDelegate: AppDelegate) {
         self.appDelegate = appDelegate
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 650),
+            contentRect: NSRect(x: 0, y: 0, width: 1080, height: 650),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -334,7 +392,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.title = "饭格"
         window.level = .normal
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 760, height: 540)
+        window.minSize = NSSize(width: 1040, height: 540)
         window.setFrameAutosaveName("DesktopRegionsSettingsWindow")
         super.init(window: window)
         window.delegate = self
@@ -387,6 +445,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 },
                 onDelete: { [weak self] id in
                     self?.deleteRegion(id: id)
+                },
+                onMapping: { [weak appDelegate] id, view in
+                    appDelegate?.requestFolderMapping(for: id, from: view)
+                },
+                onCollapseAllowed: { [weak appDelegate] id, allowed in
+                    appDelegate?.mutateRegion(id: id, actionName: "设置分区收起") {
+                        $0.allowsCollapse = allowed
+                        if !allowed { $0.isCollapsed = false }
+                    }
+                },
+                onDisplayMode: { [weak appDelegate] id, mode in
+                    appDelegate?.mutateRegion(id: id, actionName: "切换图标显示方式") { $0.displayMode = mode }
                 }
             )
             row.setDeleteMode(isDeleteMode)
@@ -577,7 +647,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func makeContentView() -> NSView {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 820, height: 622))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1080, height: 622))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
@@ -591,19 +661,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         helpButton.target = self
         helpButton.action = #selector(showHelp(_:))
         helpButton.toolTip = "展开详细使用说明"
-        helpButton.frame = NSRect(x: 758, y: 566, width: 32, height: 32)
+        helpButton.frame = NSRect(x: 1018, y: 566, width: 32, height: 32)
         helpButton.autoresizingMask = [.minXMargin, .minYMargin]
 
         macDefaultGridCheckbox.state = appDelegate?.usesMacDefaultGrid == true ? .on : .off
         macDefaultGridCheckbox.toolTip = "所有分区统一采用 Finder 的网格步进，并与桌面组件顶部对齐"
-        macDefaultGridCheckbox.frame = NSRect(x: 540, y: 570, width: 202, height: 24)
+        macDefaultGridCheckbox.frame = NSRect(x: 800, y: 570, width: 202, height: 24)
         macDefaultGridCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
 
         setLaunchAtLoginState(appDelegate?.loginItemState ?? .unavailable)
-        launchAtLoginCheckbox.frame = NSRect(x: 318, y: 570, width: 210, height: 24)
+        launchAtLoginCheckbox.frame = NSRect(x: 578, y: 570, width: 210, height: 24)
         launchAtLoginCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
 
-        tableBackground.frame = NSRect(x: 30, y: 112, width: 760, height: 410)
+        tableBackground.frame = NSRect(x: 30, y: 112, width: 1020, height: 410)
         tableBackground.wantsLayer = true
         tableBackground.layer?.cornerRadius = 16
         tableBackground.layer?.borderWidth = 1
@@ -660,11 +730,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let footer = NSStackView(views: [editButton, collapseButton, NSView(), statusLabel])
+        let updateButton = NSButton(title: "检查更新…", target: appDelegate, action: #selector(AppDelegate.checkForUpdates))
+        updateButton.bezelStyle = .rounded
+        updateButton.toolTip = "检查作者在 GitHub 发布的新版本"
+        let footer = NSStackView(views: [editButton, collapseButton, updateButton, NSView(), statusLabel])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 10
-        footer.frame = NSRect(x: 30, y: 48, width: 760, height: 34)
+        footer.frame = NSRect(x: 30, y: 48, width: 1020, height: 34)
         footer.autoresizingMask = [.width, .maxYMargin]
 
         [title, launchAtLoginCheckbox, macDefaultGridCheckbox, helpButton, tableBackground, footer].forEach(root.addSubview)
@@ -719,36 +792,54 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private func makeHelpViewController() -> NSViewController {
         let controller = NSViewController()
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 430, height: 502))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 430, height: 650))
 
         let title = NSTextField(labelWithString: "饭格使用说明")
         title.font = NSFont.systemFont(ofSize: 19, weight: .bold)
-        title.frame = NSRect(x: 24, y: 454, width: 382, height: 28)
+        title.frame = NSRect(x: 24, y: 614, width: 382, height: 28)
         root.addSubview(title)
 
         let instructions = [
             ("普通模式", "直接双击或拖动 Finder 桌面图标。把图标松到分区内后，它会吸附到该分区预设的网格位置。"),
             ("编辑与设置窗口", "点击“进入编辑模式”后拖动分区空白处可移动，拖右下角可缩放；设置窗会自动收回到右侧。也可手动点击“收起到右侧”，再点屏幕右侧的 < 标签召回。窗口仍保留标准红黄绿按钮，切换其他 App 时不会自动关闭。"),
+            ("映射文件夹", "点击灰色文件夹图标选择目录。蓝色图标表示已映射，可更换、打开或解除映射。内容实时刷新，超出分区时向下滚动；拖入文件会移动到真实目录，同名文件不会被覆盖。"),
+            ("文件排序", "点击映射或列表分区的三个点，在“文件排序”区域选择排序依据、升降序和文件夹优先。规则独立保存并立即生效，也可在文件区右键 → 排序方式，或从菜单栏的分区子菜单设置。"),
+            ("检查更新", "菜单栏或设置底部点击“检查更新…”，查看 GitHub 新版本与更新说明，并一键下载、校验、覆盖安装和重启。每次启动自动检查一次，无更新时保持安静。"),
+            ("收起与列表", "每个分区默认允许收起，点击左上角箭头即可切换。在“允许收起”列可关闭该功能；“显示方式”可切换大图标或列表。可收起的大图标保留原槽位和缓存，收展立即切换整层显示。文件仍在桌面，应用运行时持续隐藏对应的 Finder 原图标；关闭可收起、解除绑定或退出后恢复。"),
             ("复制、名称与自动启动", "每行左侧可复制分区，名称可直接编辑。右上角可设置登录时自动启动饭格。"),
             ("风格与更多设置", "点击每行或分区标题栏里的三个点，可切换标签栏及分区风格，也可细调字号、颜色、渐变、边框和网格。"),
             ("固定网格", "主设置右上角可让所有分区采用 Finder 网格。关闭开关只停止后续吸附，当前分区位置、外观和图标槽位不会变化。"),
-            ("拖放与撤销", "拖动开始后会立即释放原槽位并显示灰框；拖出可见边界即解除绑定，拖回后立即吸附。菜单栏“撤销”可逐步恢复分区参数、绑定和全部桌面图标位置。")
+            ("拖放与撤销", "拖动开始后会立即释放原槽位并显示灰框；拖出可见边界即解除绑定，拖回后立即吸附。菜单栏“撤销”可恢复分区参数、绑定及桌面图标位置，也可把移入映射文件夹的文件移回原位置。")
         ]
 
-        var y: CGFloat = 416
+        let scroll = NSScrollView(frame: NSRect(x: 24, y: 24, width: 382, height: 576))
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.contentView.drawsBackground = false
+        let text = NSTextView(frame: scroll.contentView.bounds)
+        text.isEditable = false
+        text.isSelectable = true
+        text.drawsBackground = false
+        text.isVerticallyResizable = true
+        text.isHorizontallyResizable = false
+        text.minSize = NSSize(width: 0, height: scroll.contentSize.height)
+        text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = true
+        let content = NSMutableAttributedString()
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3
+        paragraph.paragraphSpacing = 12
         for (heading, body) in instructions {
-            let headingLabel = NSTextField(labelWithString: heading)
-            headingLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-            headingLabel.frame = NSRect(x: 24, y: y, width: 382, height: 20)
-            root.addSubview(headingLabel)
-
-            let bodyLabel = NSTextField(wrappingLabelWithString: body)
-            bodyLabel.font = NSFont.systemFont(ofSize: 12)
-            bodyLabel.textColor = .secondaryLabelColor
-            bodyLabel.frame = NSRect(x: 24, y: y - 48, width: 382, height: 44)
-            root.addSubview(bodyLabel)
-            y -= 72
+            content.append(NSAttributedString(string: heading + "\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.labelColor]))
+            content.append(NSAttributedString(string: body + "\n\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: paragraph]))
         }
+        text.textStorage?.setAttributedString(content)
+        scroll.documentView = text
+        root.addSubview(scroll)
 
         controller.view = root
         return controller
@@ -807,7 +898,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 430, height: 502)
+        popover.contentSize = NSSize(width: 430, height: 650)
         popover.contentViewController = makeHelpViewController()
         helpPopover = popover
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)

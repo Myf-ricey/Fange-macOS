@@ -51,6 +51,11 @@ struct FinderDesktopGridMetrics: Equatable {
 }
 
 enum RegionLayout {
+    static func resizeHitRect(in bounds: NSRect) -> NSRect {
+        NSRect(x: max(bounds.minX, bounds.maxX - 80), y: bounds.minY,
+               width: min(80, bounds.width), height: min(80, bounds.height))
+    }
+
     static let cornerRadius: CGFloat = 18
     static let defaultHeaderHeight: CGFloat = 34
     static let defaultIconSpacing: CGFloat = 96
@@ -142,6 +147,9 @@ enum RegionLayout {
         region: Region,
         metrics: FinderDesktopGridMetrics = .current()
     ) -> NSRect {
+        if region.isCollapsed {
+            return headerRect(in: bounds, region: region, metrics: metrics)
+        }
         guard region.usesMacGridGeometry else { return bounds }
         let header = headerRect(in: bounds, region: region, metrics: metrics)
         return NSRect(
@@ -160,7 +168,7 @@ enum RegionLayout {
         for region: Region,
         metrics: FinderDesktopGridMetrics = .current()
     ) -> NSRect {
-        guard region.usesMacGridGeometry else { return region.frame }
+        guard region.usesMacGridGeometry || region.isCollapsed else { return region.frame }
         var localRegion = region
         let localBounds = NSRect(origin: .zero, size: region.frame.size)
         localRegion.setFrame(localBounds)

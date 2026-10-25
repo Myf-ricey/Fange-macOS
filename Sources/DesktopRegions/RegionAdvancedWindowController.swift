@@ -34,6 +34,10 @@ final class RegionAdvancedWindowController: NSWindowController {
     private let bottomExtensionValue = NSTextField(labelWithString: "24 pt")
     private let bottomExtensionStepper = NSStepper()
     private let spacingHint = NSTextField(wrappingLabelWithString: "网格始终保持居中；拉宽分区只增加两侧余量，不会把图标推到两边。")
+    private let fileSectionTitle = NSTextField(labelWithString: "图标网格")
+    private let sortControls = RegionSortControls()
+    private var gridControlRows: [NSView] = []
+    private var sortControlRows: [NSView] = []
     private let restoreDefaultsButton = NSButton(
         title: "恢复默认参数",
         target: nil,
@@ -56,6 +60,10 @@ final class RegionAdvancedWindowController: NSWindowController {
         window.center()
         super.init(window: window)
 
+        sortControls.onChange = { [weak self] options in
+            guard let self else { return }
+            self.appDelegate?.mutateRegion(id: self.regionID, actionName: "修改文件排序") { $0.fileSort = options }
+        }
         window.contentView = makeContentView()
         update(with: region)
     }
@@ -115,7 +123,14 @@ final class RegionAdvancedWindowController: NSWindowController {
         bottomExtensionSlider.isEnabled = !isManualGrid
         bottomExtensionStepper.isEnabled = !isManualGrid
         bottomExtensionValue.textColor = !isManualGrid ? .labelColor : .tertiaryLabelColor
-        if region.usesMacDefaultGrid {
+        let sortsFiles = region.presentsOwnFiles
+        fileSectionTitle.stringValue = sortsFiles ? "文件排序" : "图标网格"
+        gridControlRows.forEach { $0.isHidden = sortsFiles }
+        sortControlRows.forEach { $0.isHidden = !sortsFiles }
+        sortControls.update(region.fileSort)
+        if sortsFiles {
+            spacingHint.stringValue = "规则自动保存，并立即用于当前分区；也可在文件区右键调整排序。"
+        } else if region.usesMacDefaultGrid {
             let metrics = FinderDesktopGridMetrics.current()
             spacingHint.stringValue = "跟随 Finder：图标 \(Int(metrics.iconSize.rounded())) pt + 间隔 \(Int(metrics.gridSpacing.rounded())) pt；最上方档位与桌面组件顶部对齐。"
         } else {
@@ -215,19 +230,22 @@ final class RegionAdvancedWindowController: NSWindowController {
         configureColorWell(borderColorWell, action: #selector(borderColorChanged))
         addRow(label: "线条颜色", controls: [borderColorWell], y: 246, to: root)
 
-        addSectionTitle("图标网格", y: 208, to: root)
+        fileSectionTitle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        fileSectionTitle.textColor = .secondaryLabelColor
+        fileSectionTitle.frame = NSRect(x: 28, y: 208, width: 464, height: 20)
+        root.addSubview(fileSectionTitle)
         configureStepper(columnsStepper, action: #selector(columnsChanged))
         configureStepper(rowsStepper, action: #selector(rowsChanged))
         let columnsLabel = NSTextField(labelWithString: "横向")
         let rowsLabel = NSTextField(labelWithString: "纵向")
         columnsLabel.textColor = .secondaryLabelColor
         rowsLabel.textColor = .secondaryLabelColor
-        addRow(
+        gridControlRows.append(addRow(
             label: "固定行列数",
             controls: [columnsLabel, columnsValue, columnsStepper, rowsLabel, rowsValue, rowsStepper],
             y: 168,
             to: root
-        )
+        ))
 
         configureSlider(iconSpacingSlider, action: #selector(iconSpacingChanged))
         configureNumericStepper(
@@ -237,12 +255,12 @@ final class RegionAdvancedWindowController: NSWindowController {
             action: #selector(iconSpacingStepped)
         )
         iconSpacingValue.widthAnchor.constraint(equalToConstant: 52).isActive = true
-        addRow(
+        gridControlRows.append(addRow(
             label: "图标间距",
             controls: [iconSpacingSlider, iconSpacingValue, iconSpacingStepper],
             y: 126,
             to: root
-        )
+        ))
 
         configureSlider(bottomExtensionSlider, action: #selector(bottomExtensionChanged))
         configureNumericStepper(
@@ -252,12 +270,20 @@ final class RegionAdvancedWindowController: NSWindowController {
             action: #selector(bottomExtensionStepped)
         )
         bottomExtensionValue.widthAnchor.constraint(equalToConstant: 52).isActive = true
-        addRow(
+        gridControlRows.append(addRow(
             label: "下边界延伸",
             controls: [bottomExtensionSlider, bottomExtensionValue, bottomExtensionStepper],
             y: 86,
             to: root
-        )
+        ))
+
+        sortControls.keyPopup.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        sortControls.orderPopup.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        sortControlRows = [
+            addRow(label: "排序依据", controls: [sortControls.keyPopup], y: 168, to: root),
+            addRow(label: "排序顺序", controls: [sortControls.orderPopup], y: 126, to: root),
+            addRow(label: "文件夹位置", controls: [sortControls.foldersFirst], y: 86, to: root)
+        ]
 
         spacingHint.font = NSFont.systemFont(ofSize: 11)
         spacingHint.textColor = .secondaryLabelColor
@@ -283,20 +309,24 @@ final class RegionAdvancedWindowController: NSWindowController {
         root.addSubview(label)
     }
 
-    private func addRow(label text: String, controls: [NSView], y: CGFloat, to root: NSView) {
+    @discardableResult
+    private func addRow(label text: String, controls: [NSView], y: CGFloat, to root: NSView) -> NSView {
+        let row = NSView(frame: NSRect(x: 0, y: y, width: 520, height: 30))
         let label = NSTextField(labelWithString: text)
         label.font = NSFont.systemFont(ofSize: 13)
-        label.frame = NSRect(x: 40, y: y + 5, width: 132, height: 22)
-        root.addSubview(label)
+        label.frame = NSRect(x: 40, y: 5, width: 132, height: 22)
+        row.addSubview(label)
 
         let stack = NSStackView(views: controls)
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 10
         stack.distribution = .fill
-        stack.frame = NSRect(x: 184, y: y, width: 290, height: 30)
+        stack.frame = NSRect(x: 184, y: 0, width: 290, height: 30)
         controls.first?.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        root.addSubview(stack)
+        row.addSubview(stack)
+        root.addSubview(row)
+        return row
     }
 
     private func configureSlider(_ slider: NSSlider, action: Selector) {

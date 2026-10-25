@@ -10,10 +10,23 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     private let interactionWindow: RegionInteractionWindow
     private let containerView: NSView
     private let visualEffectView: NSVisualEffectView
+    private let fileScrollView = RegionFileScrollView()
+    private let filesView: RegionFilesView
+    private var loadedBindings: [RegionItemBinding]?
+    private var loadedSort: RegionFileSort?
+    private var loadedDisplayMode: RegionDisplayMode?
+    private let collapseButton = NSButton()
+    private let moreButton = NSButton()
+    private var currentEditMode = false
     private var applyingModelFrame = false
     private var snapPreviewWindow: NSWindow?
     private var snapPreviewView: MacGridSkeletonView?
 
+    var onSortChanged: ((UUID, RegionFileSort) -> Void)?
+    var onCollapseRequested: ((UUID) -> Void)?
+    var onFilesDragStarted: (([URL]) -> Void)?
+    var onFilesRevealRequested: (([URL]) -> Void)?
+    var onFilesDragEnded: ((UUID, [URL], NSDragOperation) -> Void)?
     var onFrameChanged: ((UUID, NSRect) -> Void)?
     var onFilesDropped: ((UUID, [URL], NSPoint) -> Void)?
     var onMoreRequested: ((UUID) -> Void)?
@@ -24,8 +37,10 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         interactionWindow.ignoresMouseEvents
     }
 
-    init(region: Region, editMode: Bool) {
+    init(region: Region, editMode: Bool,
+         appearanceLoader: @escaping (URL) -> RegionFileAppearance = RegionFileAppearance.load) {
         self.region = region
+        self.filesView = RegionFilesView(frame: .zero, appearanceLoader: appearanceLoader)
         self.regionView = RegionView(region: region)
         self.interactionView = RegionView(region: region, rendersVisuals: false)
         self.interactionWindow = RegionInteractionWindow(
@@ -34,7 +49,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        self.containerView = NSView(frame: NSRect(origin: .zero, size: region.frame.size))
+        self.containerView = RegionBackgroundContainer(frame: NSRect(origin: .zero, size: region.frame.size))
         self.visualEffectView = NSVisualEffectView(frame: NSRect(origin: .zero, size: region.frame.size))
 
         let window = UnconstrainedRegionWindow(
@@ -61,7 +76,8 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         interactionWindow.isOpaque = false
         interactionWindow.backgroundColor = .clear
         interactionWindow.hasShadow = false
-        interactionWindow.level = RegionWindowLayerPolicy(editMode: editMode).interactionWindowLevel
+        interactionWindow.level = RegionWindowLayerPolicy(editMode: editMode)
+            .interactionLevel(paintsContent: region.ownsFileSurface)
         interactionWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         interactionWindow.isReleasedWhenClosed = false
         interactionWindow.title = "\(region.name) 编辑层"
@@ -76,6 +92,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         interactionWindow.setFrame(region.frame, display: false)
 
         containerView.wantsLayer = true
+        containerView.autoresizingMask = [.width, .height]
         visualEffectView.autoresizingMask = [.width, .height]
         visualEffectView.blendingMode = .behindWindow
         visualEffectView.material = .hudWindow
@@ -94,6 +111,49 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
 
         window.delegate = self
+        regionView.drawsMoreIndicator = false
+        collapseButton.bezelStyle = .inline
+        collapseButton.isBordered = false
+        collapseButton.imagePosition = .imageOnly
+        collapseButton.target = self
+        collapseButton.action = #selector(toggleCollapse)
+        interactionView.addSubview(collapseButton)
+        moreButton.bezelStyle = .inline
+        moreButton.isBordered = false
+        moreButton.imagePosition = .imageOnly
+        moreButton.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "更多设置")
+        moreButton.identifier = NSUserInterfaceItemIdentifier("region-more")
+        moreButton.setAccessibilityLabel("更多设置")
+        moreButton.toolTip = "更多设置：外观、网格与文件排序"
+        moreButton.target = self
+        moreButton.action = #selector(showMore)
+        interactionView.addSubview(moreButton)
+        fileScrollView.drawsBackground = false
+        fileScrollView.contentView.drawsBackground = false
+        fileScrollView.borderType = .noBorder
+        fileScrollView.hasVerticalScroller = true
+        fileScrollView.autohidesScrollers = true
+        fileScrollView.documentView = filesView
+        fileScrollView.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(resizeFiles),
+            name: NSView.frameDidChangeNotification, object: fileScrollView.contentView)
+        interactionView.addSubview(fileScrollView, positioned: .below, relativeTo: collapseButton)
+        filesView.onFilesDropped = { [weak self] urls, point in
+            guard let self else { return }
+            self.onFilesDropped?(self.region.id, urls, self.interactionWindow.convertPoint(toScreen: point))
+        }
+        filesView.onSortChanged = { [weak self] options in
+            guard let self else { return }; self.onSortChanged?(self.region.id, options)
+        }
+        filesView.onDragStarted = { [weak self] urls in self?.onFilesDragStarted?(urls) }
+        filesView.onRevealRequested = { [weak self] urls in self?.onFilesRevealRequested?(urls) }
+        filesView.onDragEnded = { [weak self] urls, operation in
+            guard let self else { return }
+            self.onFilesDragEnded?(self.region.id, urls, operation)
+        }
+        filesView.onDropPreview = { [weak self] active in self?.regionView.setExternalFileDragPreview(active: active, at: nil) }
+        layoutFileSurface()
+
         interactionView.onFrameChanged = { [weak self] frame in
             guard let self else { return }
             self.onFrameChanged?(self.region.id, frame)
@@ -139,6 +199,9 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func update(with updatedRegion: Region) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         region = updatedRegion
         regionView.region = updatedRegion
         interactionView.region = updatedRegion
@@ -156,35 +219,99 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
             interactionWindow.setFrame(updatedRegion.frame, display: true)
         }
         updateBackdrop(for: updatedRegion)
+        layoutFileSurface()
+        applyInteractionLayer()
+        interactionWindow.displayIfNeeded()
     }
 
     func setEditMode(_ enabled: Bool) {
-        let layerPolicy = RegionWindowLayerPolicy(editMode: enabled)
-        let surfacePolicy = RegionInteractionSurfacePolicy(editMode: enabled)
+        currentEditMode = enabled
         regionView.editMode = enabled
         interactionView.editMode = enabled
         window?.ignoresMouseEvents = true
-        interactionWindow.ignoresMouseEvents = surfacePolicy.ignoresMouseEvents
-        interactionWindow.level = layerPolicy.interactionWindowLevel
-        interactionWindow.acceptsMouseMovedEvents = enabled
-        interactionView.layer?.backgroundColor = NSColor.white
-            .withAlphaComponent(surfacePolicy.hitCaptureAlpha)
-            .cgColor
-        if layerPolicy.keepsVisualWindowBelowFinderIcons {
-            window?.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
-            window?.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        }
-        window?.orderFrontRegardless()
-        if layerPolicy.usesTransparentInteractionOverlay {
-            if let frame = window?.frame {
-                interactionWindow.setFrame(frame, display: false)
+        applyInteractionLayer()
+        layoutFileSurface()
+        if !enabled { showMacGridPreview(nil) }
+    }
+
+    private func applyInteractionLayer() {
+        interactionWindow.level = RegionWindowLayerPolicy(editMode: currentEditMode)
+            .interactionLevel(paintsContent: region.ownsFileSurface)
+        interactionWindow.acceptsMouseMovedEvents = true
+        interactionView.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.01).cgColor
+        if region.ownsFileSurface {
+            // Background, title and files must commit in the same window. Two
+            // independently refreshed windows leave a stale icon-only frame.
+            if containerView.superview !== interactionView {
+                window?.contentView = nil
+                containerView.frame = interactionView.bounds
+                interactionView.addSubview(containerView, positioned: .below, relativeTo: fileScrollView)
             }
-            interactionWindow.orderFrontRegardless()
+            window?.orderOut(nil)
         } else {
-            interactionWindow.orderOut(nil)
-            showMacGridPreview(nil)
+            if window?.contentView !== containerView {
+                containerView.removeFromSuperview()
+                window?.contentView = containerView
+            }
+            window?.orderFrontRegardless()
+        }
+        interactionWindow.orderFrontRegardless()
+        if !currentEditMode {
+            updateEditInteractionPassthrough(at: NSEvent.mouseLocation, desktopIconCenters: [], iconSize: 0, isOverControlWindow: false)
         }
     }
+
+    private func layoutFileSurface(for layoutRegion: Region? = nil) {
+        let region = layoutRegion ?? self.region
+        let bounds = NSRect(origin: .zero, size: region.frame.size)
+        let header = RegionLayout.headerRect(in: bounds, region: region)
+        collapseButton.frame = NSRect(x: header.minX + 7, y: header.midY - 12, width: 26, height: 24)
+        collapseButton.image = NSImage(systemSymbolName: region.isCollapsed ? "chevron.down" : "chevron.up",
+                                       accessibilityDescription: region.isCollapsed ? "展开分区" : "收起分区")
+        collapseButton.contentTintColor = NSColor(hex: region.titleColorHex)
+        collapseButton.isHidden = !region.allowsCollapse
+        collapseButton.toolTip = region.isCollapsed ? "展开分区" : "收起分区"
+        moreButton.frame = NSRect(x: header.maxX - 42, y: header.midY - 16, width: 40, height: 32)
+        moreButton.contentTintColor = NSColor(hex: region.titleColorHex)
+        moreButton.isHidden = !currentEditMode
+        // Use expanded geometry even while collapsed so the cached document
+        // never shrinks/reloads/scrolls when the title is clicked.
+        var expanded = region; expanded.isCollapsed = false
+        let expandedHeader = RegionLayout.headerRect(in: bounds, region: expanded)
+        fileScrollView.frame = region.rendersBoundIcons
+            ? NSRect(x: 0, y: 0, width: bounds.width, height: max(1, expandedHeader.minY))
+            : NSRect(x: 6, y: 8, width: max(1, bounds.width - 12), height: max(1, expandedHeader.minY - 10))
+        fileScrollView.isHidden = !region.ownsFileSurface || region.isCollapsed
+        fileScrollView.hasVerticalScroller = !region.rendersBoundIcons
+        filesView.desktopLayout = region.rendersBoundIcons
+            ? BoundDesktopIconLayout(region: expanded, viewport: fileScrollView.frame) : nil
+        filesView.editsRegionLayout = currentEditMode
+        if filesView.mode != region.displayMode {
+            filesView.mode = region.displayMode
+            filesView.scroll(.zero)
+        }
+        filesView.sortOptions = region.fileSort
+        filesView.titleColor = NSColor(hex: region.titleColorHex)
+        if !region.isMapped && region.ownsFileSurface,
+           loadedBindings != region.itemBindings || loadedSort != region.fileSort || loadedDisplayMode != region.displayMode {
+            let urls = region.itemBindings.filter(\.isExplicit).map { URL(fileURLWithPath: $0.path) }
+                .filter { FolderFileOperations.entryExists(at: $0) }
+            setFiles(region.rendersBoundIcons ? urls : RegionFileSorting.sorted(urls, by: region.fileSort))
+            loadedBindings = region.itemBindings
+            loadedSort = region.fileSort
+            loadedDisplayMode = region.displayMode
+        }
+        filesView.resizeContent()
+    }
+
+    func setFiles(_ urls: [URL], message: String? = nil) {
+        if filesView.urls != urls { filesView.urls = urls }
+        filesView.message = message
+    }
+
+    @objc private func toggleCollapse() { onCollapseRequested?(region.id) }
+    @objc private func showMore() { onMoreRequested?(region.id) }
+    @objc private func resizeFiles() { filesView.resizeContent() }
 
     func showDropFeedback() {
         regionView.showDropFeedback()
@@ -200,10 +327,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func show() {
-        window?.orderFrontRegardless()
-        if interactionView.editMode {
-            interactionWindow.orderFrontRegardless()
-        }
+        applyInteractionLayer()
     }
 
     func activateInteractionSurface() {
@@ -217,7 +341,16 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         iconSize: CGFloat,
         isOverControlWindow: Bool
     ) {
-        guard interactionView.editMode else { return }
+        if !currentEditMode {
+            let local = NSPoint(x: mousePoint.x - region.frame.minX, y: mousePoint.y - region.frame.minY)
+            let bounds = NSRect(origin: .zero, size: region.frame.size)
+            let header = RegionLayout.headerRect(in: bounds, region: region)
+            let ownsHeader = region.allowsCollapse && header.contains(local)
+            let ownsBody = region.ownsFileSurface && !region.isCollapsed &&
+                RegionLayout.visualCollisionFrame(for: region).contains(mousePoint)
+            interactionWindow.ignoresMouseEvents = isOverControlWindow || !(ownsHeader || ownsBody)
+            return
+        }
         let isOverFinderIcon = region.frame.contains(mousePoint) &&
             desktopIconCenters.contains {
                 FinderIconHitTarget.contains(
@@ -227,13 +360,13 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
                 )
             }
         interactionWindow.ignoresMouseEvents = RegionEditPassthroughPolicy.shouldIgnoreMouseEvents(
-            isOverFinderIcon: isOverFinderIcon,
+            isOverFinderIcon: !region.ownsFileSurface && !region.isCollapsed && isOverFinderIcon,
             isOverControlWindow: isOverControlWindow
         )
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard !region.usesMacDefaultGrid else { return }
+        guard !region.usesMacDefaultGrid || region.presentsOwnFiles else { return }
         notifyFrameChangedIfNeeded()
     }
 
@@ -262,6 +395,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         window.setFrame(frame, display: true)
         applyingModelFrame = false
         updateBackdrop(for: liveRegion)
+        layoutFileSurface(for: liveRegion)
     }
 
     private func showMacGridPreview(_ frame: NSRect?) {
@@ -301,6 +435,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     }
 
     override func close() {
+        NotificationCenter.default.removeObserver(self)
         interactionWindow.orderOut(nil)
         interactionWindow.close()
         snapPreviewWindow?.orderOut(nil)
@@ -309,6 +444,10 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         snapPreviewView = nil
         super.close()
     }
+}
+
+private final class RegionBackgroundContainer: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 private final class RegionInteractionWindow: UnconstrainedRegionWindow {

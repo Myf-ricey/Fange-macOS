@@ -312,6 +312,33 @@ enum MacDefaultGridPreferencePolicy {
     }
 }
 
+enum RegionDisplayMode: String, Codable, CaseIterable {
+    case icons
+    case list
+
+    var displayName: String { self == .icons ? "大图标" : "列表" }
+}
+
+enum RegionFileSortKey: String, Codable, CaseIterable {
+    case name, modified, created, size, kind
+
+    var displayName: String {
+        switch self {
+        case .name: return "名称"
+        case .modified: return "修改时间"
+        case .created: return "创建时间"
+        case .size: return "大小"
+        case .kind: return "类型"
+        }
+    }
+}
+
+struct RegionFileSort: Codable, Equatable {
+    var key: RegionFileSortKey = .name
+    var ascending: Bool = true
+    var foldersFirst: Bool = true
+}
+
 struct Region: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
@@ -348,6 +375,20 @@ struct Region: Codable, Identifiable, Equatable {
     var gridRows: Int
     var iconSpacing: Double
     var itemBindings: [RegionItemBinding]
+    var mappedFolderPath: String?
+    var mappedFolderBookmark: Data?
+    var allowsCollapse: Bool
+    var isCollapsed: Bool
+    var displayMode: RegionDisplayMode
+    var fileSort: RegionFileSort
+
+    var isMapped: Bool { mappedFolderPath != nil }
+    var presentsOwnFiles: Bool { isMapped || displayMode == .list }
+    // Preserve the desktop grid geometry while letting one retained app view
+    // own visibility. Finder must not hide/unhide these icons on each toggle.
+    var rendersBoundIcons: Bool { !isMapped && displayMode == .icons && allowsCollapse }
+    var ownsFileSurface: Bool { presentsOwnFiles || rendersBoundIcons }
+    var hidesDesktopItems: Bool { !isMapped && (ownsFileSurface || isCollapsed) }
 
     init(
         id: UUID = UUID(),
@@ -374,7 +415,13 @@ struct Region: Codable, Identifiable, Equatable {
         gridColumns: Int = 2,
         gridRows: Int = 3,
         iconSpacing: Double = 96,
-        itemBindings: [RegionItemBinding] = []
+        itemBindings: [RegionItemBinding] = [],
+        mappedFolderPath: String? = nil,
+        mappedFolderBookmark: Data? = nil,
+        allowsCollapse: Bool = true,
+        isCollapsed: Bool = false,
+        displayMode: RegionDisplayMode = .icons,
+        fileSort: RegionFileSort = RegionFileSort()
     ) {
         self.id = id
         self.name = name
@@ -404,6 +451,12 @@ struct Region: Codable, Identifiable, Equatable {
         self.gridRows = gridRows
         self.iconSpacing = iconSpacing
         self.itemBindings = itemBindings
+        self.mappedFolderPath = mappedFolderPath
+        self.mappedFolderBookmark = mappedFolderBookmark
+        self.allowsCollapse = allowsCollapse
+        self.isCollapsed = allowsCollapse && isCollapsed
+        self.displayMode = displayMode
+        self.fileSort = fileSort
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -414,6 +467,7 @@ struct Region: Codable, Identifiable, Equatable {
         case headerWidthFraction, headerHeight, titleFontSize, titleColorHex, titleFontWeight
         case headerStyle, surfaceStyle
         case gridColumns, gridRows, iconSpacing, itemBindings
+        case mappedFolderPath, mappedFolderBookmark, allowsCollapse, isCollapsed, displayMode, fileSort
     }
 
     init(from decoder: Decoder) throws {
@@ -452,6 +506,12 @@ struct Region: Codable, Identifiable, Equatable {
         gridRows = try container.decodeIfPresent(Int.self, forKey: .gridRows) ?? 3
         iconSpacing = try container.decodeIfPresent(Double.self, forKey: .iconSpacing) ?? 96
         itemBindings = try container.decodeIfPresent([RegionItemBinding].self, forKey: .itemBindings) ?? []
+        mappedFolderPath = try container.decodeIfPresent(String.self, forKey: .mappedFolderPath)
+        mappedFolderBookmark = try container.decodeIfPresent(Data.self, forKey: .mappedFolderBookmark)
+        allowsCollapse = try container.decodeIfPresent(Bool.self, forKey: .allowsCollapse) ?? true
+        isCollapsed = try allowsCollapse && (container.decodeIfPresent(Bool.self, forKey: .isCollapsed) ?? false)
+        displayMode = try container.decodeIfPresent(RegionDisplayMode.self, forKey: .displayMode) ?? .icons
+        fileSort = try container.decodeIfPresent(RegionFileSort.self, forKey: .fileSort) ?? RegionFileSort()
     }
 
     var frame: NSRect {
@@ -459,7 +519,7 @@ struct Region: Codable, Identifiable, Equatable {
     }
 
     var usesMacGridGeometry: Bool {
-        usesMacDefaultGrid || preservesMacGridGeometry
+        !presentsOwnFiles && (usesMacDefaultGrid || preservesMacGridGeometry)
     }
 
     mutating func setFrame(_ newFrame: NSRect) {
@@ -549,7 +609,10 @@ struct Region: Codable, Identifiable, Equatable {
             gridColumns: gridColumns,
             gridRows: gridRows,
             iconSpacing: iconSpacing,
-            itemBindings: []
+            itemBindings: [],
+            allowsCollapse: allowsCollapse,
+            displayMode: displayMode,
+            fileSort: fileSort
         )
     }
 

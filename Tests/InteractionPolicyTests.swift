@@ -6,6 +6,39 @@ import Cocoa
 @main
 struct InteractionPolicyTests {
     static func main() {
+        let finderFailure = DesktopArranger.finderError([
+            NSAppleScript.errorAppName: "Finder",
+            NSAppleScript.errorMessage: "无法完成此操作。",
+            NSAppleScript.errorNumber: -10000
+        ])
+        precondition(finderFailure.localizedDescription.contains("无法完成此操作。"))
+        precondition(finderFailure.localizedDescription.contains("-10000"))
+        precondition(finderFailure.code == -10000)
+        precondition(DesktopArranger.finderError([:]).localizedDescription.contains("Finder 未能完成"))
+
+        // Opt-in live regression: exercise the actual positioning call against
+        // a desktop symlink, preserving its current coordinates.
+        if let name = ProcessInfo.processInfo.environment["FANGE_TEST_DESKTOP_LINK"] {
+            let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
+            let url = desktop.appendingPathComponent(name)
+            precondition((try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil)
+            let escapedName = name.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            let reader = NSAppleScript(source: "tell application \"Finder\" to get desktop position of item \"\(escapedName)\" of desktop")!
+            var scriptError: NSDictionary?
+            let position = reader.executeAndReturnError(&scriptError)
+            precondition(scriptError == nil && position.numberOfItems == 2)
+            let original = NSPoint(x: Int(position.atIndex(1)!.int32Value), y: Int(position.atIndex(2)!.int32Value))
+            let error = DesktopArranger.restoreDesktopIconPositions([
+                DesktopIconPosition(path: url.path, position: original)
+            ])
+            precondition(error == nil, "桌面符号链接定位失败：\(String(describing: error))")
+            let after = reader.executeAndReturnError(&scriptError)
+            precondition(scriptError == nil && after.atIndex(1)!.int32Value == Int32(original.x)
+                && after.atIndex(2)!.int32Value == Int32(original.y))
+            print("live desktop symbolic-link positioning: PASS")
+        }
+
         let normalMode = RegionInteractionPolicy(editMode: false)
         let editMode = RegionInteractionPolicy(editMode: true)
 
@@ -261,7 +294,9 @@ struct InteractionPolicyTests {
             frame: originalFrame,
             colorHex: "#112233"
         )
-        let editHitTestController = RegionWindowController(region: layoutRegion, editMode: true)
+        var nativeHitTestRegion = layoutRegion
+        nativeHitTestRegion.allowsCollapse = false
+        let editHitTestController = RegionWindowController(region: nativeHitTestRegion, editMode: true)
         let finderIconPoint = NSPoint(x: 180, y: 760)
         editHitTestController.updateEditInteractionPassthrough(
             at: finderIconPoint,
@@ -1202,6 +1237,37 @@ struct InteractionPolicyTests {
         let fulfilledProgrammaticPaths = programmaticTracker.fulfilledPaths(
             in: [programmaticPath: programmaticNew, userPath: userNew]
         )
+        // Collapse removes a Finder entry from one poll; expand restores it in
+        // the next. It is still an app-owned entry, not a fresh user drop.
+        let restoredEvents = FinderDesktopPollEventPipeline.events(
+            previous: [:],
+            current: [programmaticPath: programmaticNew, desktopPath: newItem],
+            selectedPaths: [],
+            trackedMovementPaths: [],
+            ignoredMovementPaths: fulfilledProgrammaticPaths
+        )
+        precondition(
+            restoredEvents.first == .movement(items: [newItem], previousItems: []),
+            "展开恢复的图标不能被再次吸附并闪出骨架；同轮新拖入的文件仍需处理"
+        )
+        for _ in 0..<1000 {
+            let expandEvents = FinderDesktopPollEventPipeline.events(
+                previous: [:],
+                current: [programmaticPath: programmaticNew, desktopPath: newItem],
+                selectedPaths: [programmaticPath],
+                trackedMovementPaths: [],
+                ignoredAppearancePaths: [programmaticPath]
+            )
+            precondition(expandEvents.first == .movement(items: [newItem], previousItems: []),
+                "收起再展开保留绑定；不能重排原图标或吞掉其他真实拖入")
+        }
+        let existingBoundDrag = FinderDesktopChangeDetector.changedItems(
+            previous: [programmaticPath: programmaticOld],
+            current: [programmaticPath: programmaticNew],
+            selectedPaths: [programmaticPath],
+            ignoredAppearancePaths: [programmaticPath]
+        )
+        precondition(existingBoundDrag == [programmaticNew], "已绑定图标的真实拖动仍要即时识别")
         precondition(
             fulfilledProgrammaticPaths == [programmaticPath],
             "程序移动只能按路径和目标坐标精确兑现，不能清空整个 Finder 基线"

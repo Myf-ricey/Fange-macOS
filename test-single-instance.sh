@@ -1,5 +1,4 @@
 #!/bin/zsh
-
 # Copyright 2026 Myf-ricey
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail

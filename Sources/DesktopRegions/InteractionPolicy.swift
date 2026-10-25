@@ -87,6 +87,16 @@ struct RegionWindowLayerPolicy {
     var interactionWindowLevel: NSWindow.Level {
         editMode ? .statusBar : .normal
     }
+
+    func interactionLevel(paintsContent: Bool) -> NSWindow.Level {
+        // The elevated legacy overlay is transparent. A composite region
+        // paints files/backgrounds, so it must stay below ordinary controls
+        // even while editing; orderFront alone cannot fix different levels.
+        if paintsContent || !editMode {
+            return NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+        }
+        return interactionWindowLevel
+    }
 }
 
 struct RegionInteractionSurfacePolicy {
