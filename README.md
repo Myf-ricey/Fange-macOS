@@ -10,7 +10,7 @@
 
 饭格让桌面图标整齐归位，也能把真实文件夹映射到桌面分区。支持大图标、列表、展开收起和独立排序，照常双击打开文件、拖动整理。
 
-> 当前版本：`0.2.4 Beta`。全部功能免费，无广告、无账号、无订阅；源代码允许个人和企业使用、修改与商用。
+> 当前版本：`0.2.5 Beta`。全部功能免费，无广告、无账号、无订阅；源代码允许个人和企业使用、修改与商用。
 
 <p align="center">
   <img src="assets/poster.png" width="640" alt="饭格核心功能海报">
@@ -18,10 +18,10 @@
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.2.4) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.2.4/Fange-v0.2.4-macOS-universal.zip)：
+前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.2.5) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.2.5/Fange-v0.2.5-macOS-universal.zip)：
 
 ```text
-Fange-v0.2.4-macOS-universal.zip
+Fange-v0.2.5-macOS-universal.zip
 ```
 
 支持 Apple Silicon 与 Intel Mac，系统要求 macOS 13 Ventura 或更高版本。

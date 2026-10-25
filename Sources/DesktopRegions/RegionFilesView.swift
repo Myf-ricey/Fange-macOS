@@ -60,6 +60,55 @@ final class RegionFileScrollView: NSScrollView {
     }
 }
 
+/// Region windows share one desktop selection. Observe both in-app clicks
+/// (including headers and edit-mode passthrough) and clicks delivered to other
+/// apps, since neither reaches the previously selected file view's mouseDown.
+final class RegionFileSelectionCoordinator {
+    static let shared = RegionFileSelectionCoordinator()
+    private let views = NSHashTable<RegionFilesView>.weakObjects()
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    private var windowResignObserver: NSObjectProtocol?
+
+    private init() {
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.handleMouseDown(event)
+            return event
+        }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.clearAll()
+        }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in self?.clearAll() }
+        windowResignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: nil, queue: nil
+        ) { [weak self] notification in
+            guard let self, let window = notification.object as? NSWindow else { return }
+            self.views.allObjects.filter { $0.window === window }.forEach { $0.clearSelection() }
+        }
+    }
+
+    func register(_ view: RegionFilesView) { views.add(view) }
+
+    func handleMouseDown(_ event: NSEvent) {
+        for view in views.allObjects {
+            // Use the actual hit view, not just the frame: a scroller, header,
+            // resize handle or another window may own the click at that point.
+            if let window = view.window, event.window === window,
+               let content = window.contentView,
+               content.hitTest(content.superview?.convert(event.locationInWindow, from: nil)
+                    ?? event.locationInWindow) === view {
+                continue
+            }
+            view.clearSelection()
+        }
+    }
+
+    func clearAll() { views.allObjects.forEach { $0.clearSelection() } }
+}
+
 /// The scrollable file surface for mapped folders and ordinary list regions.
 /// All drag pasteboard entries are real URLs, so Finder and other apps can
 /// open/move the original entry without aliases or copied display files.
@@ -85,7 +134,7 @@ final class RegionFilesView: NSView, NSDraggingSource {
     var onRevealRequested: (([URL]) -> Void)?
     var onDragEnded: (([URL], NSDragOperation) -> Void)?
     var onDropPreview: ((Bool) -> Void)?
-    private var selectedPaths = Set<String>()
+    private(set) var selectedPaths = Set<String>()
     private var mouseDownPoint: NSPoint?
     private var draggedURLs: [URL] = []
     private var appearances: [String: RegionFileAppearance] = [:]
@@ -106,8 +155,17 @@ final class RegionFilesView: NSView, NSDraggingSource {
         registerForDraggedTypes([.fileURL])
         setAccessibilityRole(.list)
         setAccessibilityLabel("分区文件")
+        RegionFileSelectionCoordinator.shared.register(self)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func clearSelection() {
+        anchorIndex = nil
+        mouseDownPoint = nil
+        guard !selectedPaths.isEmpty else { return }
+        selectedPaths.removeAll()
+        needsDisplay = true
+    }
 
     private var columns: Int { mode == .list ? 1 : max(1, Int(bounds.width / 104)) }
     private var cellHeight: CGFloat { mode == .list ? 30 : 112 }
@@ -196,7 +254,7 @@ final class RegionFilesView: NSView, NSDraggingSource {
         window?.makeFirstResponder(self)
         mouseDownPoint = convert(event.locationInWindow, from: nil)
         guard let i = index(at: mouseDownPoint!) else {
-            selectedPaths.removeAll(); needsDisplay = true; return
+            clearSelection(); return
         }
         if event.modifierFlags.contains(.shift), let anchor = anchorIndex {
             for j in min(anchor, i)...max(anchor, i) where urls.indices.contains(j) { selectedPaths.insert(urls[j].path) }
