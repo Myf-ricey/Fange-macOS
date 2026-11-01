@@ -10,8 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let store: RegionStore
 
-    init(store: RegionStore = RegionStore()) {
+    init(store: RegionStore = RegionStore(), desktopVisibility: DesktopItemVisibility = DesktopItemVisibility()) {
         self.store = store
+        self.desktopVisibility = desktopVisibility
         super.init()
     }
     private var regionWindows: [UUID: RegionWindowController] = [:]
@@ -33,7 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let loginItemManager = LoginItemManager()
     private var undoHistory = WorkspaceUndoHistory(limit: 50)
     private var isApplyingUndo = false
-    private let desktopVisibility = DesktopItemVisibility()
+    private let desktopVisibility: DesktopItemVisibility
+    private let desktopDropController = DesktopDropController()
     private var folderSessions: [UUID: MappedFolderSession] = [:]
     private let fileOperationQueue = DispatchQueue(label: "com.ricey.desktop-regions.moves", qos: .userInitiated)
     private var fileMoveInProgress = false
@@ -143,6 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        desktopDropController.end()
         updateManager.cancel()
         pendingDragCleanupWorkItem?.cancel()
         folderSessions.removeAll()
@@ -462,17 +465,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.desktopVisibility.temporarilyVisiblePaths.formUnion(paths)
                     do { try self.desktopVisibility.restore(paths: paths) } catch { self.showError(error) }
                 }
-                controller.onFilesDragStarted = revealForFinder
+                controller.onFilesDragStarted = { [weak self] urls in
+                    self?.beginFileDrag(regionID: region.id, urls: urls)
+                }
+                controller.onFilesDragMoved = { [weak self] point in
+                    self?.updateFileDrag(at: point)
+                }
                 controller.onFilesRevealRequested = revealForFinder
-                controller.onFilesDragEnded = { [weak self] id, urls, operation in
+                controller.onFilesRevealEnded = { [weak self] urls in
                     guard let self else { return }
-                    let paths = Set(urls.map(\.path))
-                    if operation.contains(.move), self.store.region(id: id)?.isMapped == false,
-                       RegionLayout.dropTargetRegion(at: NSEvent.mouseLocation, in: self.store.regions)?.id != id {
-                        self.removeBindings(forPaths: paths)
-                    }
-                    self.desktopVisibility.temporarilyVisiblePaths.subtract(paths.subtracting(self.fileTransferProtectedPaths))
+                    self.desktopVisibility.temporarilyVisiblePaths.subtract(Set(urls.map(\.path)).subtracting(self.fileTransferProtectedPaths))
                     _ = self.synchronizeFilePresentation()
+                }
+                controller.onFilesDragEnded = { [weak self] id, urls, operation in
+                    self?.endFileDrag(regionID: id, urls: urls, operation: operation)
                 }
                 controller.onFrameChanged = { [weak self] id, frame in
                     self?.regionFrameChanged(id: id, frame: frame)
@@ -501,6 +507,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateEditInteractionHitTesting(at: NSEvent.mouseLocation)
         refreshAvailableSlots()
         rebuildStatusMenu()
+    }
+
+    func beginFileDrag(regionID: UUID, urls: [URL]) {
+        guard store.region(id: regionID)?.isMapped == false else { return }
+        desktopDropController.acceptsPoint = { [weak self] point in
+            guard let self,
+                  RegionLayout.dropTargetRegion(at: point, in: self.store.regions) == nil,
+                  NSScreen.screens.contains(where: { $0.visibleFrame.contains(point) }) else { return false }
+            let screen = NSScreen.screens.first!
+            return !self.finderDesktopMonitor.currentItems.contains {
+                FinderIconHitTarget.contains(point,
+                    iconCenter: self.globalPoint(forFinderPosition: $0.position, screen: screen),
+                    iconSize: FinderDesktopGridMetrics.current().iconSize)
+            }
+        }
+        desktopDropController.onDrop = { [weak self] urls, point in
+            self?.releaseBoundFilesToDesktop(urls, at: point) ?? false
+        }
+        desktopDropController.begin(urls: urls)
+    }
+
+    func endFileDrag(regionID: UUID, urls: [URL], operation: NSDragOperation) {
+        desktopDropController.end()
+        // Internal destinations have already updated ownership. Never erase
+        // their new bindings from the source's later endedAt callback.
+        if operation.contains(.move), let source = store.region(id: regionID), !source.isMapped {
+            let missingSourcePaths = Set(source.itemBindings.map(\.path)).intersection(urls.filter {
+                !FolderFileOperations.entryExists(at: $0)
+            }.map(\.path)).subtracting(fileTransferProtectedPaths)
+            removeBindings(forPaths: missingSourcePaths)
+        }
+        _ = synchronizeFilePresentation()
+    }
+
+    func updateFileDrag(at point: NSPoint) {
+        desktopDropController.update(at: point)
+    }
+
+    @discardableResult
+    func releaseBoundFilesToDesktop(_ urls: [URL], at point: NSPoint) -> Bool {
+        let urls = uniqueDesktopURLs(urls)
+        guard !urls.isEmpty, urls.allSatisfy(isDesktopURL),
+              RegionLayout.dropTargetRegion(at: point, in: store.regions) == nil,
+              let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(point) }) else { return false }
+        let paths = Set(urls.map(\.path))
+        let ownedPaths = Set(store.regions.filter { !$0.isMapped }.flatMap { $0.itemBindings.map(\.path) })
+        guard paths.isSubset(of: ownedPaths) else { return false }
+        let snapshot = makeWorkspaceSnapshot()
+        let metrics = FinderDesktopGridMetrics.current()
+        let positions = urls.enumerated().map { index, url in
+            let columns = max(1, Int((screen.visibleFrame.maxX - point.x) / metrics.pitch))
+            let x = min(screen.visibleFrame.maxX - metrics.horizontalInset,
+                        max(screen.visibleFrame.minX + metrics.horizontalInset, point.x + CGFloat(index % columns) * metrics.pitch))
+            let y = max(screen.visibleFrame.minY + metrics.bottomInset,
+                        min(screen.visibleFrame.maxY - metrics.topInset, point.y - CGFloat(index / columns) * metrics.pitch))
+            // Finder positions use the primary display's top-left origin,
+            // including for icons placed on a secondary display.
+            let primary = NSScreen.screens.first!.frame
+            return DesktopIconPosition(path: url.path, position: NSPoint(x: x - primary.minX, y: primary.maxY - y))
+        }
+        // Position while still hidden: unhiding first would briefly paint the
+        // original desktop coordinates before Finder receives the new ones.
+        if let error = restoreDesktopIconPositionsProgrammatically(positions) {
+            showError(error)
+            return false
+        }
+        desktopVisibility.temporarilyVisiblePaths.formUnion(paths)
+        defer { desktopVisibility.temporarilyVisiblePaths.subtract(paths) }
+        do { try desktopVisibility.restore(paths: paths) }
+        catch { showError(error); return false }
+        removeBindings(forPaths: paths)
+        recordUndoStep(title: "把图标移出分区", snapshot: snapshot)
+        settingsWindow?.setStatus("已将 \(urls.count) 个图标移回桌面")
+        return true
     }
 
     private func regionFrameChanged(id: UUID, frame: NSRect) {

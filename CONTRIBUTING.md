@@ -16,9 +16,13 @@
 ./test-drag.sh
 ./test-single-instance.sh
 ./test-folders.sh
+./test-selection.sh
+./test-desktop-drop.sh
 ./test-updates.sh  # 需要 Keka
 ./build.sh
 ```
+
+需要验证 Finder 的实际落点时，运行 `FANGE_LIVE_DROP_TEST=1 ./test-desktop-drop.sh`。该检查使用临时桌面替身，并在结束后清理。
 
 ## 贡献许可
 

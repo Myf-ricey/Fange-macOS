@@ -10,7 +10,7 @@
 
 饭格让桌面图标整齐归位，也能把真实文件夹映射到桌面分区。支持大图标、列表、展开收起和独立排序，照常双击打开文件、拖动整理。
 
-> 当前版本：`0.2.5 Beta`。全部功能免费，无广告、无账号、无订阅；源代码允许个人和企业使用、修改与商用。
+> 当前下载版本：`0.2.5 Beta`；`main` 分支版本：`0.2.6`。全部功能免费，无广告、无账号、无订阅；源代码允许个人和企业使用、修改与商用。
 
 <p align="center">
   <img src="assets/poster.png" width="640" alt="饭格核心功能海报">
@@ -86,6 +86,8 @@ cd Fange-macOS
 ./test-drag.sh
 ./test-single-instance.sh
 ./test-folders.sh
+./test-selection.sh
+./test-desktop-drop.sh
 ./test-updates.sh  # 安装包测试需要 Keka
 ./build.sh
 open DesktopRegions.app

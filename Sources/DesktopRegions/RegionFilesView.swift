@@ -131,7 +131,10 @@ final class RegionFilesView: NSView, NSDraggingSource {
     var message: String? { didSet { needsDisplay = true } }
     var onFilesDropped: (([URL], NSPoint) -> Void)?
     var onDragStarted: (([URL]) -> Void)?
+    var onDragMoved: ((NSPoint) -> Void)?
+    var exportsBoundDesktopItems = false
     var onRevealRequested: (([URL]) -> Void)?
+    var onRevealEnded: (([URL]) -> Void)?
     var onDragEnded: (([URL], NSDragOperation) -> Void)?
     var onDropPreview: ((Bool) -> Void)?
     private(set) var selectedPaths = Set<String>()
@@ -214,7 +217,7 @@ final class RegionFilesView: NSView, NSDraggingSource {
         }
         for i in urls.indices {
             let rect = cell(i)
-            guard rect.intersects(dirtyRect) else { continue }
+            guard rect.intersects(dirtyRect), !draggedURLs.contains(urls[i]) else { continue }
             let url = urls[i]
             let selected = selectedPaths.contains(url.path)
             if selected {
@@ -276,6 +279,7 @@ final class RegionFilesView: NSView, NSDraggingSource {
         draggedURLs = urls.filter { selectedPaths.contains($0.path) }
         guard !draggedURLs.isEmpty else { return }
         onDragStarted?(draggedURLs)
+        needsDisplay = true
         let items = draggedURLs.map { url -> NSDraggingItem in
             let item = NSDraggingItem(pasteboardWriter: url as NSURL)
             item.setDraggingFrame(NSRect(x: point.x - 24, y: point.y - 24, width: 48, height: 48),
@@ -286,9 +290,14 @@ final class RegionFilesView: NSView, NSDraggingSource {
         beginDraggingSession(with: items, event: event, source: self)
     }
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { [.copy, .move] }
+    func draggingSession(_ session: NSDraggingSession, movedTo screenPoint: NSPoint) {
+        // Hit testing follows the pointer, independent of the drag image's offset.
+        onDragMoved?(NSEvent.mouseLocation)
+    }
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         onDragEnded?(draggedURLs, operation)
         draggedURLs = []
+        needsDisplay = true
     }
 
     override func keyDown(with event: NSEvent) {
@@ -322,7 +331,7 @@ final class RegionFilesView: NSView, NSDraggingSource {
             onRevealRequested?([url])
             NSWorkspace.shared.activateFileViewerSelecting([url])
             // Restore ordinary list ownership after Finder has selected it.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.onDragEnded?([url], []) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.onRevealEnded?([url]) }
         }
     }
 

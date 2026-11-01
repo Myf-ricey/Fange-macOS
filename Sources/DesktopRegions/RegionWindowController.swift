@@ -25,7 +25,9 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     var onSortChanged: ((UUID, RegionFileSort) -> Void)?
     var onCollapseRequested: ((UUID) -> Void)?
     var onFilesDragStarted: (([URL]) -> Void)?
+    var onFilesDragMoved: ((NSPoint) -> Void)?
     var onFilesRevealRequested: (([URL]) -> Void)?
+    var onFilesRevealEnded: (([URL]) -> Void)?
     var onFilesDragEnded: ((UUID, [URL], NSDragOperation) -> Void)?
     var onFrameChanged: ((UUID, NSRect) -> Void)?
     var onFilesDropped: ((UUID, [URL], NSPoint) -> Void)?
@@ -146,7 +148,9 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }; self.onSortChanged?(self.region.id, options)
         }
         filesView.onDragStarted = { [weak self] urls in self?.onFilesDragStarted?(urls) }
+        filesView.onDragMoved = { [weak self] point in self?.onFilesDragMoved?(point) }
         filesView.onRevealRequested = { [weak self] urls in self?.onFilesRevealRequested?(urls) }
+        filesView.onRevealEnded = { [weak self] urls in self?.onFilesRevealEnded?(urls) }
         filesView.onDragEnded = { [weak self] urls, operation in
             guard let self else { return }
             self.onFilesDragEnded?(self.region.id, urls, operation)
@@ -286,6 +290,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         filesView.desktopLayout = region.rendersBoundIcons
             ? BoundDesktopIconLayout(region: expanded, viewport: fileScrollView.frame) : nil
         filesView.editsRegionLayout = currentEditMode
+        filesView.exportsBoundDesktopItems = !region.isMapped
         if filesView.mode != region.displayMode {
             filesView.mode = region.displayMode
             filesView.scroll(.zero)
