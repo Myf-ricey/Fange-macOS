@@ -24,6 +24,10 @@
 
 需要验证 Finder 的实际落点时，运行 `FANGE_LIVE_DROP_TEST=1 ./test-desktop-drop.sh`。该检查使用临时桌面替身，并在结束后清理。
 
+## 发布更新
+
+维护者发布更新时，完成 `main` 推送、GitHub Releases 的 ZIP 与校验文件发布，并运行 `./Tools/verify-published-update.sh <上一个公开版本>` 验证真实应用更新路径。发布流程见 [Release 文件](release/README.md)。
+
 ## 贡献许可
 
 向本仓库提交贡献，即表示你确认有权提交这些内容，并同意按照 Apache License 2.0 将贡献授权给项目及其用户。品牌和视觉资产仍受 [BRAND_ASSETS.md](BRAND_ASSETS.md) 约束。

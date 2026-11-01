@@ -1,4 +1,4 @@
-# 饭格 0.2.6 Beta（待发布）
+# 饭格 0.2.6 Beta
 
 - 修复图标拖入普通分区后，无法正常拖回桌面空白处的问题。
 - 拖动期间不再显示旧位置的 Finder 原图标，消除残影；成功落到桌面后保留实际落点。
@@ -7,7 +7,7 @@
 
 ## 使用与安装
 
-安装包发布后，下载 `Fange-v0.2.6-macOS-universal.zip`，解压后把“饭格.app”拖入“应用程序”。适用于 Apple Silicon 和 Intel Mac，要求 macOS 13 或更高版本。
+下载 `Fange-v0.2.6-macOS-universal.zip`，解压后把“饭格.app”拖入“应用程序”。适用于 Apple Silicon 和 Intel Mac，要求 macOS 13 或更高版本。
 
 从 0.1.0 升级请先正常退出旧版，再替换 App；原分区配置继续保留。0.2.4 起支持在菜单栏内检查并安装后续更新。
 

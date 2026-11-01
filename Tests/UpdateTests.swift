@@ -140,6 +140,26 @@ struct UpdateTests {
         if ProcessInfo.processInfo.environment["FANGE_LIVE_UPDATE_CHECK"] == "1" {
             let live = try await GitHubUpdateService().latest()
             check(UpdatePolicy.trustedReleaseURL(live.release.html_url, asset: false) != nil)
+            guard live.canInstall else { throw UpdatePolicy.error("GitHub 最新发布缺少兼容安装包或校验信息。") }
+            if let expected = ProcessInfo.processInfo.environment["FANGE_EXPECTED_UPDATE_VERSION"] {
+                guard let version = UpdateVersion(expected), live.version == version,
+                      live.release.tag_name == "v\(expected)" else {
+                    throw UpdatePolicy.error("预期发布 v\(expected)，更新器实际检出 \(live.release.tag_name)。")
+                }
+            }
+            for architecture in ["arm64", "x86_64"] {
+                guard let compatible = UpdatePolicy.latest(in: [live.release], architecture: architecture),
+                      compatible.canInstall else {
+                    throw UpdatePolicy.error("已发布版本缺少 \(architecture) 可安装更新。")
+                }
+                print("published update available for \(architecture): PASS")
+            }
+            if let previous = ProcessInfo.processInfo.environment["FANGE_PREVIOUS_UPDATE_VERSION"] {
+                guard let version = UpdateVersion(previous), version < live.version else {
+                    throw UpdatePolicy.error("已发布版本 \(live.release.tag_name) 没有高于旧版 \(previous)。")
+                }
+                print("upgrade from \(previous) to \(live.release.tag_name): PASS")
+            }
             print("live GitHub check: PASS (\(live.release.tag_name), installable: \(live.canInstall))")
             if ProcessInfo.processInfo.environment["FANGE_LIVE_UPDATE_DOWNLOAD"] == "1" {
                 let liveWorkspace = root.appendingPathComponent("live-download", isDirectory: true)
@@ -152,6 +172,11 @@ struct UpdateTests {
                 let files = fm.enumerator(at: expanded, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles, .skipsPackageDescendants])!
                 let app = (files.allObjects as! [URL]).first { $0.pathExtension == "app" }!
                 try UpdateInstaller.verifyApplication(app, releaseTag: live.release.tag_name, requiredTeam: nil)
+                if live.asset?.name.lowercased().contains("universal") == true {
+                    try UpdateInstaller.run("/usr/bin/lipo", [app.appendingPathComponent("Contents/MacOS/DesktopRegions").path,
+                                                             "-verify_arch", "arm64", "x86_64"])
+                    print("downloaded universal binary contains arm64 and x86_64: PASS")
+                }
                 print("real GitHub asset download, digest, archive and application verification (no installation): PASS")
             }
         }
