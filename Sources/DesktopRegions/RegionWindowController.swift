@@ -28,6 +28,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     var onFilesDragMoved: ((NSPoint) -> Void)?
     var onFilesRevealRequested: (([URL]) -> Void)?
     var onFilesRevealEnded: (([URL]) -> Void)?
+    var onRenameFile: ((UUID, URL, String) -> Void)?
     var onFilesDragEnded: ((UUID, [URL], NSDragOperation) -> Void)?
     var onFrameChanged: ((UUID, NSRect) -> Void)?
     var onFilesDropped: ((UUID, [URL], NSPoint) -> Void)?
@@ -151,6 +152,10 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         filesView.onDragMoved = { [weak self] point in self?.onFilesDragMoved?(point) }
         filesView.onRevealRequested = { [weak self] urls in self?.onFilesRevealRequested?(urls) }
         filesView.onRevealEnded = { [weak self] urls in self?.onFilesRevealEnded?(urls) }
+        filesView.onRename = { [weak self] url, name in
+            guard let self else { return }
+            self.onRenameFile?(self.region.id, url, name)
+        }
         filesView.onDragEnded = { [weak self] urls, operation in
             guard let self else { return }
             self.onFilesDragEnded?(self.region.id, urls, operation)
@@ -286,6 +291,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
             ? NSRect(x: 0, y: 0, width: bounds.width, height: max(1, expandedHeader.minY))
             : NSRect(x: 6, y: 8, width: max(1, bounds.width - 12), height: max(1, expandedHeader.minY - 10))
         fileScrollView.isHidden = !region.ownsFileSurface || region.isCollapsed
+        if fileScrollView.isHidden { filesView.clearSelection() }
         fileScrollView.hasVerticalScroller = !region.rendersBoundIcons
         filesView.desktopLayout = region.rendersBoundIcons
             ? BoundDesktopIconLayout(region: expanded, viewport: fileScrollView.frame) : nil
@@ -312,6 +318,13 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     func setFiles(_ urls: [URL], message: String? = nil) {
         if filesView.urls != urls { filesView.urls = urls }
         filesView.message = message
+    }
+
+    func followFileRename(from source: URL, to destination: URL) {
+        filesView.followRename(from: source, to: destination)
+        if region.isMapped, filesView.urls.contains(source) {
+            setFiles(RegionFileSorting.sorted(filesView.urls.map { $0 == source ? destination : $0 }, by: region.fileSort))
+        }
     }
 
     @objc private func toggleCollapse() { onCollapseRequested?(region.id) }

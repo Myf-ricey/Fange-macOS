@@ -80,14 +80,37 @@ enum FolderFileOperations {
         }
     }
 
+    static func rename(_ source: URL, to name: String) throws -> FileMove {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !name.hasPrefix("."), !name.contains("/"), !name.contains(":"), !name.contains("\0") else {
+            throw error("文件名不能为空、不能以句点开头，也不能包含斜杠或冒号。")
+        }
+        let destination = source.deletingLastPathComponent().appendingPathComponent(name)
+        let move = FileMove(source: source.path, destination: destination.path)
+        try execute([move])
+        return move
+    }
+
     static func undo(_ moves: [FileMove]) throws {
         // Preflight reverse operations too: undo must never overwrite new work.
         for move in moves {
             var info = stat()
             guard lstat(move.destination, &info) == 0 else { throw error("无法撤销：文件已被移动或删除。\n\(move.destination)") }
-            guard lstat(move.source, &info) != 0 else { throw error("无法撤销：原位置已有同名文件。\n\(move.source)") }
+            guard lstat(move.source, &info) != 0 || isAlternateSpelling(move) else {
+                throw error("无法撤销：原位置已有同名文件。\n\(move.source)")
+            }
         }
         try execute(moves.reversed().map { FileMove(source: $0.destination, destination: $0.source) })
+    }
+
+    private static func isAlternateSpelling(_ move: FileMove) -> Bool {
+        let source = URL(fileURLWithPath: move.source)
+        let destination = URL(fileURLWithPath: move.destination)
+        let folder = source.deletingLastPathComponent()
+        guard folder == destination.deletingLastPathComponent(),
+              source.lastPathComponent.caseInsensitiveCompare(destination.lastPathComponent) == .orderedSame,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return false }
+        return names.contains(destination.lastPathComponent) && !names.contains(source.lastPathComponent)
     }
 
     private static func coordinatedMove(from source: URL, to destination: URL) throws {
@@ -121,6 +144,7 @@ final class MappedFolderSession {
     private let queue = DispatchQueue(label: "com.ricey.desktop-regions.folder", qos: .userInitiated)
     private var loading = false
     private var reloadAgain = false
+    private var discardCurrentLoad = false
     var onChange: (([URL], String?) -> Void)?
     var sortOptions: RegionFileSort {
         didSet { if sortOptions != oldValue { reload() } }
@@ -148,8 +172,12 @@ final class MappedFolderSession {
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.reload() }
     }
 
-    func reload() {
-        guard !loading else { reloadAgain = true; return }
+    func reload(discardInFlight: Bool = false) {
+        guard !loading else {
+            reloadAgain = true
+            discardCurrentLoad = discardCurrentLoad || discardInFlight
+            return
+        }
         loading = true
         let url = folderURL
         let sort = sortOptions
@@ -162,9 +190,13 @@ final class MappedFolderSession {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.loading = false
-                switch result {
-                case .success(let urls): self.onChange?(urls, nil)
-                case .failure(let error): self.onChange?([], "文件夹暂不可访问，请检查磁盘或重新选择映射。\n\(error.localizedDescription)")
+                if self.discardCurrentLoad {
+                    self.discardCurrentLoad = false
+                } else {
+                    switch result {
+                    case .success(let urls): self.onChange?(urls, nil)
+                    case .failure(let error): self.onChange?([], "文件夹暂不可访问，请检查磁盘或重新选择映射。\n\(error.localizedDescription)")
+                    }
                 }
                 if self.watcher == nil { self.installWatcher() }
                 if self.reloadAgain { self.reloadAgain = false; self.reload() }
