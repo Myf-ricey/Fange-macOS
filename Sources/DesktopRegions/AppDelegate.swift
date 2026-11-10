@@ -472,9 +472,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.updateFileDrag(at: point)
                 }
                 controller.onFilesRevealRequested = revealForFinder
-                controller.onRenameFile = { [weak self] id, url, name in
-                    self?.renameFile(url, to: name, in: id)
-                }
                 controller.onFilesRevealEnded = { [weak self] urls in
                     guard let self else { return }
                     self.desktopVisibility.temporarilyVisiblePaths.subtract(Set(urls.map(\.path)).subtracting(self.fileTransferProtectedPaths))
@@ -833,7 +830,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Hidden entries can still be renamed/moved by Finder when the user
         // enables hidden files. Follow their identity rather than leaving an
         // invisible stale binding behind.
-        let relocated = desktopVisibility.relocatedEntries.filter { !fileTransferProtectedPaths.contains($0.key) }
+        let relocated = desktopVisibility.relocatedEntries
         if !relocated.isEmpty {
             var regions = store.regions
             for index in regions.indices {
@@ -848,7 +845,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             syncRegionsAfterStoreChange()
         }
         let isInitialSnapshot = !hasRestoredBindings
-        if !hasRestoredBindings && !fileMoveInProgress {
+        if !hasRestoredBindings {
             hasRestoredBindings = true
             pruneMissingBindings(using: items)
             store.regions.forEach {
@@ -1410,54 +1407,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             session.start()
         }
         return true
-    }
-
-    private func renameFile(_ url: URL, to name: String, in regionID: UUID) {
-        guard !fileMoveInProgress else {
-            showError(FolderFileOperations.error("正在处理其他文件，请稍后再试。"))
-            return
-        }
-        guard let region = store.region(id: regionID) else { return }
-        let source = url.standardizedFileURL
-        let session = folderSessions[regionID]
-        if region.isMapped {
-            guard source.deletingLastPathComponent().path == session?.folderURL.standardizedFileURL.path else { return }
-        } else {
-            guard region.itemBindings.contains(where: { $0.isExplicit && $0.path == source.path }) else { return }
-        }
-        let snapshot = makeWorkspaceSnapshot()
-        fileMoveInProgress = true
-        fileTransferProtectedPaths.insert(source.path)
-        rebuildStatusMenu()
-        fileOperationQueue.async { [weak self, session] in
-            let result = Result { try FolderFileOperations.rename(source, to: name) }
-            DispatchQueue.main.async { [weak self, session] in
-                _ = session // Keep access to the mapped directory through the rename.
-                guard let self else { return }
-                self.fileMoveInProgress = false
-                self.fileTransferProtectedPaths.remove(source.path)
-                switch result {
-                case .success(let move):
-                    let destination = URL(fileURLWithPath: move.destination)
-                    var regions = self.store.regions
-                    for index in regions.indices {
-                        for binding in regions[index].itemBindings.indices
-                            where regions[index].itemBindings[binding].path == move.source {
-                            regions[index].itemBindings[binding].path = move.destination
-                        }
-                    }
-                    if regions != self.store.regions { self.store.replace(with: regions) }
-                    self.regionWindows.values.forEach { $0.followFileRename(from: source, to: destination) }
-                    self.syncRegionsAfterStoreChange()
-                    self.folderSessions.values.forEach { $0.reload(discardInFlight: true) }
-                    self.recordUndoStep(title: "重新命名", snapshot: snapshot, fileMoves: [move])
-                case .failure(let error):
-                    self.showError(error)
-                }
-                self.rebuildStatusMenu()
-                self.finishPendingTermination()
-            }
-        }
     }
 
     private func moveFilesIntoMappedFolder(_ urls: [URL], regionID: UUID) {

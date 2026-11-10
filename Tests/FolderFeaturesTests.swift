@@ -8,9 +8,7 @@ import Darwin
 struct FolderFeaturesTests {
     static func main() throws {
         _ = NSApplication.shared
-        func check(_ condition: Bool, _ message: String = "check failed", line: UInt = #line) {
-            precondition(condition, message, line: line)
-        }
+        func check(_ condition: Bool, _ message: String = "check failed") { precondition(condition, message) }
         let fm = FileManager.default
         let root = fm.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("fange-folder-tests-\(UUID())", isDirectory: true)
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -131,23 +129,6 @@ struct FolderFeaturesTests {
         rejects { _ = try FolderFileOperations.planMove([collision], into: target) }
         print("real moves, rollback, no overwrite, self/descendant rejection, symlink preservation: PASS")
 
-        let renameFixture = try write("rename.txt", in: source, text: "original")
-        for invalid in ["", " ", "../escape", "sub/file", "a:b", ".hidden", "two.txt"] {
-            rejects { _ = try FolderFileOperations.rename(renameFixture, to: invalid) }
-        }
-        let brokenLink = source.appendingPathComponent("broken-link")
-        try fm.createSymbolicLink(at: brokenLink, withDestinationURL: root.appendingPathComponent("missing"))
-        rejects { _ = try FolderFileOperations.rename(renameFixture, to: brokenLink.lastPathComponent) }
-        let caseMove = try FolderFileOperations.rename(renameFixture, to: "Rename.txt")
-        check(try fm.contentsOfDirectory(atPath: source.path).contains("Rename.txt"))
-        try FolderFileOperations.undo([caseMove])
-        let nameMove = try FolderFileOperations.rename(renameFixture, to: "改名.txt")
-        check(!fm.fileExists(atPath: renameFixture.path))
-        check(try String(contentsOfFile: nameMove.destination, encoding: .utf8) == "original")
-        try FolderFileOperations.undo([nameMove])
-        check(try fm.contentsOfDirectory(atPath: source.path).contains("rename.txt"))
-        print("rename validation, collisions, case-only rename and undo: PASS")
-
         let desktop = try directory("desktop")
         let file = try write("ordinary.txt", in: desktop)
         let originalHidden = try write("already-hidden.txt", in: desktop)
@@ -163,13 +144,7 @@ struct FolderFeaturesTests {
         defer { try? visibility.restoreAll() }
         check(hidden(file) && hidden(desktopLink) && !hidden(one))
         let renamed = desktop.appendingPathComponent("renamed.txt")
-        let hiddenMove = try FolderFileOperations.rename(file, to: renamed.lastPathComponent)
-        check(hidden(renamed), "重命名期间应保留隐藏标记")
-        check(visibility.relocatedEntries[file.path].map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() } == renamed,
-              "重命名后仍能通过显隐日志定位文件")
-        ordinary.itemBindings[0].path = hiddenMove.destination
-        try visibility.synchronize(regions: [ordinary])
-        check(hidden(renamed) && ordinary.itemBindings[0].slotIndex == 0)
+        try fm.moveItem(at: file, to: renamed)
         let recovery = DesktopItemVisibility(journalURL: journal, desktopURL: desktop)
         try recovery.restoreAll()
         check(!hidden(renamed) && !hidden(desktopLink) && hidden(originalHidden) && !hidden(one))

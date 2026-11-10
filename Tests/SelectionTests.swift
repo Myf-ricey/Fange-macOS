@@ -22,19 +22,14 @@ struct SelectionTests {
         }
         let (firstWindow, first) = surface()
         let (secondWindow, second) = surface()
-        func mouse(_ type: NSEvent.EventType, in view: RegionFilesView, at point: NSPoint,
-                   modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
-            NSEvent.mouseEvent(with: type,
+        func click(_ view: RegionFilesView, point: NSPoint = NSPoint(x: 45, y: 40),
+                   modifiers: NSEvent.ModifierFlags = []) {
+            let event = NSEvent.mouseEvent(with: .leftMouseDown,
                 location: view.convert(point, to: nil), modifierFlags: modifiers,
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: view.window!.windowNumber,
                 context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
-        }
-        func click(_ view: RegionFilesView, point: NSPoint = NSPoint(x: 45, y: 40),
-                   modifiers: NSEvent.ModifierFlags = []) {
-            let event = mouse(.leftMouseDown, in: view, at: point, modifiers: modifiers)
             app.sendEvent(event)
             view.mouseDown(with: event)
-            view.mouseUp(with: mouse(.leftMouseUp, in: view, at: point, modifiers: modifiers))
         }
         click(first)
         precondition(first.selectedPaths == [first.urls[0].path], "点击必须选中文件")
@@ -99,42 +94,7 @@ struct SelectionTests {
             context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         app.sendEvent(blankClick)
         precondition(boundFiles.selectedPaths.isEmpty, "编辑空白透传到父视图时也必须清除蓝块")
-
-        var submittedNames: [String] = []
-        first.onRename = { url, name in
-            precondition(url == first.urls[0])
-            submittedNames.append(name)
-        }
-        func renameField() -> NSTextField? {
-            first.subviews.compactMap { $0 as? NSTextField }.first
-        }
-        let namePoint = NSPoint(x: 53, y: 82)
-        click(first, point: namePoint)
-        precondition(renameField() == nil, "第一次点击名字只选中")
-        click(first, point: NSPoint(x: 53, y: 40))
-        precondition(renameField() == nil, "再次点击图标不应进入编辑")
-        click(first, point: namePoint, modifiers: .shift)
-        precondition(renameField() == nil, "组合键选择不应进入编辑")
-        click(first, point: namePoint)
-        let nameEditor = renameField()!.currentEditor() as! NSTextView
-        precondition(nameEditor.selectedRange.length == "selection-0".count, "默认只选中文件名主体")
-        nameEditor.string = "新名称.app"
-        nameEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
-        precondition(renameField() == nil && submittedNames == ["新名称.app"], "回车提交一次")
-
-        let menu = first.menu(for: mouse(.rightMouseDown, in: first, at: NSPoint(x: 53, y: 40)))!
-        let rename = menu.item(withTitle: "重新命名")!
-        precondition(app.sendAction(rename.action!, to: rename.target, from: rename))
-        let menuEditor = renameField()!.currentEditor() as! NSTextView
-        menuEditor.string = "不提交.app"
-        menuEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
-        precondition(renameField() == nil && submittedNames.count == 1, "Esc 取消右键重命名")
-
-        let destination = URL(fileURLWithPath: "/tmp/新名称.app")
-        first.followRename(from: first.urls[0], to: destination)
-        first.urls[0] = destination
-        precondition(first.selectedPaths == [destination.path], "刷新后仍选中新路径")
         withExtendedLifetime((firstWindow, secondWindow)) {}
-        print("file selection lifecycle and inline rename: PASS")
+        print("file selection lifecycle: PASS")
     }
 }
