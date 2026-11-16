@@ -10,9 +10,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let store: RegionStore
 
-    init(store: RegionStore = RegionStore(), desktopVisibility: DesktopItemVisibility = DesktopItemVisibility()) {
+    init(
+        store: RegionStore = RegionStore(),
+        desktopVisibility: DesktopItemVisibility = DesktopItemVisibility(),
+        workspaceRecovery: WorkspaceRecovery = WorkspaceRecovery()
+    ) {
         self.store = store
         self.desktopVisibility = desktopVisibility
+        self.workspaceRecovery = workspaceRecovery
         super.init()
     }
     private var regionWindows: [UUID: RegionWindowController] = [:]
@@ -35,12 +40,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var undoHistory = WorkspaceUndoHistory(limit: 50)
     private var isApplyingUndo = false
     private let desktopVisibility: DesktopItemVisibility
+    private let workspaceRecovery: WorkspaceRecovery
+    private var desktopChanges: DispatchSourceFileSystemObject?
     private let desktopDropController = DesktopDropController()
     private var folderSessions: [UUID: MappedFolderSession] = [:]
     private let fileOperationQueue = DispatchQueue(label: "com.ricey.desktop-regions.moves", qos: .userInitiated)
     private var fileMoveInProgress = false
     private var fileTransferProtectedPaths = Set<String>()
     private var terminateAfterFileOperation = false
+    private var isPreparingToQuit = false
+    private var openRecoveryOnQuit = false
+
+    deinit {
+        desktopChanges?.cancel()
+    }
 
     @MainActor private lazy var updateManager = AppUpdateManager { [weak self] in
         guard let self else { throw UpdatePolicy.error("应用正在退出，请重新打开后重试。") }
@@ -65,14 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         loginItemManager.refreshEnabledItemPath()
 
-        if store.isEmpty {
-            let frame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-            store.replace(with: RegionStore.defaultRegions(in: frame))
-        }
-
+        loadWorkspace()
         loadAndApplyGlobalGridPreference()
 
-        _ = synchronizeFilePresentation()
+        watchDesktopChanges()
+        reconcileDesktopBindings()
         setupStatusItem()
         rebuildRegionWindows()
         updateManager.didLaunch()
@@ -103,6 +113,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+    }
+
+    func loadWorkspace() {
+        guard store.isEmpty else { return }
+        if let saved = workspaceRecovery.latestLayout() {
+            store.replace(with: saved.regions)
+            UserDefaults.standard.set(saved.usesMacDefaultGrid, forKey: PreferenceKey.usesMacDefaultGrid)
+        } else {
+            let frame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            store.replace(with: RegionStore.defaultRegions(in: frame))
+        }
     }
 
     @objc func openSettings() {
@@ -145,6 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        isPreparingToQuit = true
+        finderDesktopMonitor.isEnabled = false
+        finderDesktopMonitor.stop()
+        desktopChanges?.cancel()
+        desktopChanges = nil
+        repositionWorkItems.values.forEach { $0.cancel() }
         desktopDropController.end()
         updateManager.cancel()
         pendingDragCleanupWorkItem?.cancel()
@@ -223,6 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forKey: PreferenceKey.usesMacDefaultGrid
         )
         store.replace(with: step.snapshot.regions)
+        reconcileDesktopBindings(refreshPresentation: false)
         dragAvailabilityState.endDrag()
         dragAvailabilityState.clearPendingConfirmation()
         finderDesktopMonitor.clearTrackedMovements()
@@ -749,7 +777,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ items: [FinderDesktopItem],
         previousItems: [FinderDesktopItem]
     ) {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard !isPreparingToQuit,
+              let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let undoSnapshot = makeWorkspaceSnapshot(finderItems: previousItems)
         let movingPaths = Set(items.map { $0.url.standardizedFileURL.path })
         let temporarilyReleasedPaths = dragAvailabilityState.excludedPaths(
@@ -762,6 +791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var pathsToUnbind = Set<String>()
 
         for item in items {
+            guard FolderFileOperations.entryExists(at: item.url) else { continue }
             let path = item.url.standardizedFileURL.path
             let globalPoint = globalPoint(forFinderPosition: item.position, screen: screen)
             guard let region = RegionLayout.dropTargetRegion(
@@ -800,7 +830,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 in: region,
                 screen: screen
             ) {
-                showError(error)
+                if !DesktopArranger.isMissingItemError(error) { showError(error) }
                 continue
             }
             successfulPlacements.append((regionID, urls, slots))
@@ -830,27 +860,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleFinderSnapshot(items: [FinderDesktopItem], selectedPaths: Set<String>) {
-        // Hidden entries can still be renamed/moved by Finder when the user
-        // enables hidden files. Follow their identity rather than leaving an
-        // invisible stale binding behind.
-        let relocated = desktopVisibility.relocatedEntries.filter { !fileTransferProtectedPaths.contains($0.key) }
-        if !relocated.isEmpty {
-            var regions = store.regions
-            for index in regions.indices {
-                regions[index].itemBindings = regions[index].itemBindings.compactMap { binding in
-                    guard let path = relocated[binding.path] else { return binding }
-                    let url = URL(fileURLWithPath: path)
-                    guard isDesktopURL(url) else { return nil }
-                    return RegionItemBinding(path: path, slotIndex: binding.slotIndex, isExplicit: binding.isExplicit)
-                }
-            }
-            store.replace(with: regions)
-            syncRegionsAfterStoreChange()
+        guard !isPreparingToQuit else { return }
+        if desktopChanges == nil {
+            watchDesktopChanges()
+            reconcileDesktopBindings()
         }
         let isInitialSnapshot = !hasRestoredBindings
         if !hasRestoredBindings && !fileMoveInProgress {
             hasRestoredBindings = true
-            pruneMissingBindings(using: items)
             store.regions.forEach {
                 scheduleBoundItemReposition(regionID: $0.id, reason: .restoreBindings)
             }
@@ -1126,39 +1143,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         region.itemBindings = normalized
     }
 
-    private func syncRegionsAfterStoreChange() {
+    private func syncRegionsAfterStoreChange(reportErrors: Bool = true) {
         for region in store.regions {
             regionWindows[region.id]?.update(with: region)
             settingsWindow?.updateRegionRow(region)
             settingsWindow?.updateAdvancedEditor(region)
         }
-        _ = synchronizeFilePresentation()
+        _ = synchronizeFilePresentation(reportErrors: reportErrors)
         refreshAvailableSlots()
     }
 
-    private func pruneMissingBindings(using items: [FinderDesktopItem]) {
-        // Hidden ordinary-list/collapsed entries are absent from Finder's
-        // desktop enumeration; filesystem existence is authoritative for them.
-        let managedPaths = store.regions.flatMap { $0.itemBindings.map(\.path) }.filter {
-            var info = stat()
-            return lstat($0, &info) == 0
+    func watchDesktopChanges() {
+        guard desktopChanges == nil else { return }
+        let fd = open(desktopVisibility.desktopURL.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write, .delete, .rename, .revoke], queue: .main
+        )
+        desktopChanges = source
+        source.setEventHandler { [weak self] in
+            guard let self, let watcher = self.desktopChanges else { return }
+            if !watcher.data.intersection([.delete, .rename, .revoke]).isEmpty {
+                watcher.cancel()
+                self.desktopChanges = nil
+            }
+            self.reconcileDesktopBindings()
         }
-        let existingPaths = Set(items.map { $0.url.standardizedFileURL.path }).union(managedPaths)
+        source.setCancelHandler { close(fd) }
+        source.resume()
+    }
+
+    private func reconcileDesktopBindings(refreshPresentation: Bool = true) {
+        guard !isPreparingToQuit, !fileMoveInProgress else { return }
+        // Finder omits hidden files from some snapshots and can return stale
+        // positions. Reconcile ownership from the desktop directory itself.
+        let relocated = desktopVisibility.relocatedEntries
+        let desktopAvailable = !FolderFileOperations.entryIsMissing(at: desktopVisibility.desktopURL)
         var regions = store.regions
-        var changed = false
-        for index in regions.indices {
+        for index in regions.indices where !regions[index].isMapped {
+            let bindings = regions[index].itemBindings.compactMap { binding -> RegionItemBinding? in
+                let path = relocated[binding.path] ?? binding.path
+                let url = URL(fileURLWithPath: path)
+                guard isDesktopURL(url),
+                      !desktopAvailable || !FolderFileOperations.entryIsMissing(at: url) else { return nil }
+                return RegionItemBinding(path: path, slotIndex: binding.slotIndex, isExplicit: binding.isExplicit)
+            }
             let capacity = min(12, max(1, regions[index].gridColumns)) * min(12, max(1, regions[index].gridRows))
-            let validated = RegionBindingPolicy.validBindings(
-                regions[index].itemBindings,
-                existingPaths: existingPaths,
+            regions[index].itemBindings = RegionBindingPolicy.validBindings(
+                bindings,
+                existingPaths: Set(bindings.map(\.path)),
                 capacity: capacity
             )
-            changed = changed || validated != regions[index].itemBindings
-            regions[index].itemBindings = validated
         }
-        if changed {
+        if regions != store.regions {
             store.replace(with: regions)
-            syncRegionsAfterStoreChange()
+            if refreshPresentation { syncRegionsAfterStoreChange(reportErrors: false) }
+        } else if refreshPresentation {
+            _ = synchronizeFilePresentation(reportErrors: false)
         }
     }
 
@@ -1182,7 +1223,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         regionID: UUID,
         reason: BoundItemRepositionReason
     ) {
-        guard let region = store.region(id: regionID),
+        guard !isPreparingToQuit,
+              let region = store.region(id: regionID),
               !region.itemBindings.isEmpty,
               !region.hidesDesktopItems, !region.isMapped,
               let screen = NSScreen.main ?? NSScreen.screens.first else { return }
@@ -1193,7 +1235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let validBindings = region.itemBindings.filter {
             $0.isExplicit &&
             finderPositions.indices.contains($0.slotIndex) &&
-            FileManager.default.fileExists(atPath: $0.path) &&
+            FolderFileOperations.entryExists(at: URL(fileURLWithPath: $0.path)) &&
             !dragAvailabilityState.excludedPaths(
                 selectedPaths: finderDesktopMonitor.currentSelectedPaths
             ).contains($0.path)
@@ -1201,9 +1243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bindingsToMove: [RegionItemBinding]
         if reason.canSkipItemsMatchingFinderSnapshot {
             bindingsToMove = validBindings.filter { binding in
-                guard let current = currentByPath[binding.path] else { return true }
-                let target = finderPositions[binding.slotIndex]
-                return abs(current.x - CGFloat(target.x)) > 2 || abs(current.y - CGFloat(target.y)) > 2
+                FinderBindingDriftPolicy.hasDrift(current: currentByPath[binding.path],
+                    target: finderPositions[binding.slotIndex], isSelected: false)
             }
         } else {
             bindingsToMove = validBindings
@@ -1215,9 +1256,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             urls,
             toSlotIndices: slots,
             in: region,
-            screen: screen
+            screen: screen,
+            ignoringMissingItems: true
         ) {
-            showError(error)
+            settingsWindow?.setStatus(error.localizedDescription)
         }
     }
 
@@ -1225,7 +1267,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ urls: [URL],
         toSlotIndices slotIndices: [Int],
         in region: Region,
-        screen: NSScreen
+        screen: NSScreen,
+        ignoringMissingItems: Bool = false
     ) -> Error? {
         // Managed file layers move their cached cells immediately. Finder
         // positioning is only needed for a region displaying native icons.
@@ -1248,7 +1291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             urls,
             toSlotIndices: slotIndices,
             in: region,
-            screen: screen
+            screen: screen,
+            ignoringMissingItems: ignoringMissingItems
         )
         if error != nil {
             finderDesktopMonitor.cancelExpectedProgrammaticMoves(
@@ -1281,10 +1325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func isDesktopURL(_ url: URL) -> Bool {
-        guard let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first else {
-            return false
-        }
-        return url.deletingLastPathComponent().standardizedFileURL.path == desktopURL.standardizedFileURL.path
+        desktopVisibility.contains(url)
     }
 
     private func globalPoint(forFinderPosition position: NSPoint, screen: NSScreen) -> NSPoint {
@@ -1377,12 +1418,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func synchronizeFilePresentation() -> Bool {
+    private func synchronizeFilePresentation(reportErrors: Bool = true) -> Bool {
+        guard !isPreparingToQuit else { return true }
         finderDesktopMonitor.boundDesktopPaths = Set(store.regions.filter { !$0.isMapped }.flatMap {
             $0.itemBindings.filter(\.isExplicit).map(\.path)
         })
         do { try desktopVisibility.synchronize(regions: store.regions) }
-        catch { showError(error); return false }
+        catch {
+            if reportErrors { showError(error) }
+            else { settingsWindow?.setStatus(error.localizedDescription) }
+            return false
+        }
         for (id, session) in folderSessions {
             let region = store.region(id: id)
             if region?.mappedFolderPath != session.savedPath || region?.mappedFolderBookmark != session.bookmark {
@@ -1510,15 +1556,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finishPendingTermination() {
-        guard terminateAfterFileOperation else { return }
+        guard terminateAfterFileOperation else { reconcileDesktopBindings(); return }
         terminateAfterFileOperation = false
-        do {
-            try desktopVisibility.restoreAll()
-            NSApp.reply(toApplicationShouldTerminate: true)
-        } catch {
-            showError(error)
-            NSApp.reply(toApplicationShouldTerminate: false)
-        }
+        NSApp.reply(toApplicationShouldTerminate: prepareForTermination())
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -1526,8 +1566,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             terminateAfterFileOperation = true
             return .terminateLater
         }
-        do { try desktopVisibility.restoreAll(); return .terminateNow }
-        catch { showError(error); return .terminateCancel }
+        return prepareForTermination() ? .terminateNow : .terminateCancel
+    }
+
+    private func prepareForTermination() -> Bool {
+        guard !isPreparingToQuit else { return true }
+        reconcileDesktopBindings(refreshPresentation: false)
+        isPreparingToQuit = true
+        let openSnapshot = openRecoveryOnQuit
+        openRecoveryOnQuit = false
+        let snapshot: URL?
+        do {
+            snapshot = try saveRecoverySnapshot()
+        } catch {
+            if openSnapshot {
+                isPreparingToQuit = false
+                syncRegionsAfterStoreChange(reportErrors: false)
+                showError(error)
+                return false
+            }
+            NSLog("无法保存分区备份：%@", error.localizedDescription)
+            snapshot = nil
+        }
+        do {
+            try desktopVisibility.restoreAll()
+        } catch {
+            isPreparingToQuit = false
+            syncRegionsAfterStoreChange(reportErrors: false)
+            showError(error)
+            return false
+        }
+        if openSnapshot, let snapshot {
+            NSWorkspace.shared.open(snapshot)
+        }
+        return true
+    }
+
+    private func saveRecoverySnapshot() throws -> URL {
+        try workspaceRecovery.save(regions: store.regions, usesMacDefaultGrid: usesMacDefaultGrid,
+                                   mappedFolders: folderSessions.mapValues(\.folderURL))
+    }
+
+    var recoveryFolderURL: URL { workspaceRecovery.folderURL }
+
+    @objc func openRecoveryFolder() {
+        guard canChangeWorkspace() else { return }
+        reconcileDesktopBindings()
+        do { NSWorkspace.shared.open(try saveRecoverySnapshot()) }
+        catch { showError(error) }
+    }
+
+    @objc func chooseRecoveryFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "选择分区备份保存位置"
+        panel.prompt = "选择"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = workspaceRecovery.folderURL
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        workspaceRecovery.setFolder(folder)
+        settingsWindow?.setStatus("分区备份将保存到 \(folder.path)")
+    }
+
+    @objc func resetRecoveryFolder() {
+        workspaceRecovery.setFolder(nil)
+        settingsWindow?.setStatus("分区备份将保存到 \(workspaceRecovery.folderURL.path)")
+    }
+
+    @objc private func quitAndOpenRecoveryFolder() {
+        openRecoveryOnQuit = true
+        NSApp.terminate(nil)
     }
 
     @objc private func screenParametersChanged() {
@@ -1643,6 +1752,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(updateItem)
         let quitItem = NSMenuItem(title: "退出饭格", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
+        let recoveryItem = NSMenuItem(title: "退出并打开恢复文件夹", action: #selector(quitAndOpenRecoveryFolder), keyEquivalent: "")
+        recoveryItem.target = self
+        menu.addItem(recoveryItem)
         statusItem.menu = menu
     }
 

@@ -8,10 +8,6 @@ import Darwin
 struct DesktopDropTests {
     static func main() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
-        func check(_ condition: @autoclosure () -> Bool, _ message: String) {
-            if !condition() { print("FAIL: \(message)"); exit(1) }
-            print("PASS: \(message)")
-        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let desktop = root.appendingPathComponent("Desktop")
         try FileManager.default.createDirectory(at: desktop, withIntermediateDirectories: true)
@@ -84,6 +80,17 @@ struct DesktopDropTests {
         check(store.region(id: destination.id)!.itemBindings.isEmpty && movedInfo.st_flags & UInt32(UF_HIDDEN) == 0,
               "an external move unbinds the original path and restores visibility at the new location")
 
+        try verifyQuitRecovery(in: root)
+        if ProcessInfo.processInfo.environment["FANGE_LIVE_FINDER_MISSING_TEST"] == "1" {
+            let missing = realDesktop.appendingPathComponent("FangeMissing-\(UUID().uuidString)")
+            let screen = NSScreen.screens.first!
+            let error = DesktopArranger.moveDesktopItems([missing], toSlotIndices: [0], in: region, screen: screen)
+            check(error.map(DesktopArranger.isMissingItemError) == true, "real Finder reports a deleted item")
+            check(DesktopArranger.moveDesktopItems([missing], toSlotIndices: [0], in: region, screen: screen,
+                                                  ignoringMissingItems: true) == nil,
+                  "background positioning tolerates the real Finder missing-item error")
+        }
+
         // Real Finder regression, using a disposable alias instead of changing
         // the user's Zotero icon or their saved region configuration.
         if ProcessInfo.processInfo.environment["FANGE_LIVE_DROP_TEST"] == "1" {
@@ -125,5 +132,113 @@ struct DesktopDropTests {
             check(aliasValues.isAliasFile == true &&
                   FileManager.default.fileExists(atPath: aliasTarget.path), "alias identity and original application target are preserved")
         }
+    }
+
+    private static func verifyQuitRecovery(in root: URL) throws {
+        let manager = FileManager.default
+        let desktop = root.appendingPathComponent("Recovery Desktop", isDirectory: true)
+        let mapped = root.appendingPathComponent("Mapped Folder", isDirectory: true)
+        let selected = root.appendingPathComponent("Selected Backup Folder", isDirectory: true)
+        for folder in [desktop, mapped, selected] {
+            try manager.createDirectory(at: folder, withIntermediateDirectories: false)
+        }
+        let deleted = desktop.appendingPathComponent("deleted.txt")
+        let original = desktop.appendingPathComponent("before-rename.txt")
+        let originallyHidden = desktop.appendingPathComponent("already-hidden.txt")
+        for file in [deleted, original, originallyHidden] {
+            try Data("fixture".utf8).write(to: file)
+        }
+        check(lchflags(originallyHidden.path, UInt32(UF_HIDDEN)) == 0, "fixture is independently hidden")
+
+        let store = RegionStore(fileURL: root.appendingPathComponent("recovery-test-regions.json"))
+        var region = Region.defaultNewRegion(frame: NSRect(x: -5000, y: -5000, width: 400, height: 500))
+        region.name = "工具/办公"
+        region.displayMode = .list
+        region.isCollapsed = true
+        region.itemBindings = [deleted, original, originallyHidden].enumerated()
+            .map { RegionItemBinding(path: $0.element.path, slotIndex: $0.offset) }
+        var mappedRegion = region.duplicated(name: "映射", frame: region.frame)
+        mappedRegion.mappedFolderPath = mapped.path
+        store.replace(with: [region, mappedRegion])
+
+        let journal = root.appendingPathComponent("recovery-test-hidden.json")
+        let visibility = DesktopItemVisibility(journalURL: journal, desktopURL: desktop)
+        try visibility.synchronize(regions: store.regions)
+        let preferenceName = "FangeRecoveryTests-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: preferenceName)!
+        defer { preferences.removePersistentDomain(forName: preferenceName) }
+        let fallback = root.appendingPathComponent("Default Backup Folder", isDirectory: true)
+        let recovery = WorkspaceRecovery(preferences: preferences, defaultFolderURL: fallback)
+        recovery.setFolder(selected)
+        let delegate = AppDelegate(store: store, desktopVisibility: visibility, workspaceRecovery: recovery)
+        delegate.watchDesktopChanges()
+
+        try manager.removeItem(at: deleted)
+        waitUntil("a Desktop deletion releases its binding without a Finder snapshot") {
+            !store.regions[0].itemBindings.contains { $0.path == deleted.path }
+        }
+        let renamed = desktop.appendingPathComponent("after-rename.txt")
+        try manager.moveItem(at: original, to: renamed)
+        waitUntil("a Desktop rename preserves the hidden entry's slot") {
+            store.regions[0].itemBindings.contains { $0.path == renamed.path && $0.slotIndex == 1 } && isHidden(renamed)
+        }
+
+        try Data("replacement".utf8).write(to: deleted)
+        store.mutate(id: region.id) { $0.itemBindings.append(RegionItemBinding(path: deleted.path, slotIndex: 0)) }
+        try visibility.synchronize(regions: store.regions)
+        check(isHidden(deleted), "a deleted entry's visibility record cannot claim a new file with the same name")
+
+        check(delegate.applicationShouldTerminate(NSApp) == .terminateNow, "normal quit completes with a recovery snapshot")
+        check(!isHidden(renamed) && !isHidden(deleted) && isHidden(originallyHidden),
+              "normal quit restores app-owned Desktop flags and respects a preexisting hidden file")
+        try Data().write(to: desktop.appendingPathComponent("late-change.txt"))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        check(!isHidden(renamed) && !isHidden(deleted), "a late filesystem event cannot hide Desktop entries after quit preparation")
+
+        let folders = try manager.contentsOfDirectory(at: selected, includingPropertiesForKeys: nil)
+        check(folders.count == 1, "clean quit saves one complete snapshot in the user-selected folder")
+        let directory = folders[0]
+        let layout = try JSONDecoder().decode(WorkspaceRecovery.Layout.self, from: Data(contentsOf: directory.appendingPathComponent("分区布局.json")))
+        check(layout.regions == store.regions, "the snapshot preserves names, geometry, collapsed state, mapping and slot ownership")
+        let link = directory.appendingPathComponent("1 工具／办公").appendingPathComponent(renamed.lastPathComponent)
+        let aliasTarget = try URL(resolvingAliasFileAt: link, options: [.withoutUI, .withoutMounting])
+        let alias = try link.resourceValues(forKeys: [.isAliasFileKey])
+        let mappedLink = directory.appendingPathComponent("2 映射").appendingPathComponent("打开映射文件夹")
+        let mappedTarget = try URL(resolvingAliasFileAt: mappedLink, options: [.withoutUI, .withoutMounting])
+        check(alias.isAliasFile == true && aliasTarget.resolvingSymlinksInPath().path == renamed.resolvingSymlinksInPath().path &&
+              mappedTarget.resolvingSymlinksInPath().path == mapped.resolvingSymlinksInPath().path,
+              "Finder aliases open the original Desktop item and mapped folder")
+
+        let recoveredStore = RegionStore(fileURL: root.appendingPathComponent("missing-regions.json"))
+        let persistedVisibility = DesktopItemVisibility(journalURL: journal, desktopURL: desktop)
+        let relaunched = AppDelegate(store: recoveredStore, desktopVisibility: persistedVisibility, workspaceRecovery: recovery)
+        relaunched.loadWorkspace()
+        check(recoveredStore.regions == layout.regions, "launch recovers the layout when the main configuration is missing")
+        try persistedVisibility.synchronize(regions: recoveredStore.regions)
+        check(isHidden(renamed) && isHidden(deleted), "relaunch restores managed icon presentation from the saved bindings")
+        try persistedVisibility.restoreAll()
+
+        recovery.setFolder(root.appendingPathComponent("Unavailable Backup Folder", isDirectory: true))
+        let backup = try recovery.save(regions: store.regions, usesMacDefaultGrid: true)
+        check(backup.deletingLastPathComponent().path == fallback.path && recovery.latestLayout()?.usesMacDefaultGrid == true,
+              "an unavailable custom folder falls back to the default and the layout remains recoverable")
+    }
+
+    private static func isHidden(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && info.st_flags & UInt32(UF_HIDDEN) != 0
+    }
+
+    private static func waitUntil(_ message: String, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(3)
+        while !condition() && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.025))
+        }
+        check(condition(), message)
+    }
+
+    private static func check(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if !condition() { print("FAIL: \(message)"); exit(1) }
+        print("PASS: \(message)")
     }
 }

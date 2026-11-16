@@ -349,7 +349,7 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
             anchorIndex = i
         }
         needsDisplay = true
-        if event.clickCount == 2 { NSWorkspace.shared.open(urls[i]) }
+        if event.clickCount == 2, let url = existingURL(urls[i]) { NSWorkspace.shared.open(url) }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -395,7 +395,8 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.writeObjects(urls.filter { selectedPaths.contains($0.path) }.map { $0 as NSURL })
         } else if event.keyCode == 36 {
-            urls.filter { selectedPaths.contains($0.path) }.forEach { NSWorkspace.shared.open($0) }
+            urls.filter { selectedPaths.contains($0.path) }.compactMap { existingURL($0) }
+                .forEach { NSWorkspace.shared.open($0) }
         } else { super.keyDown(with: event) }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -442,11 +443,11 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
     }
 
     @objc private func openWithContext(_ item: NSMenuItem) {
-        guard let url = contextURL, let app = item.representedObject as? URL else { return }
+        guard let url = existingURL(contextURL), let app = item.representedObject as? URL else { return }
         NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    @objc private func openContext() { if let url = contextURL { NSWorkspace.shared.open(url) } }
+    @objc private func openContext() { if let url = existingURL(contextURL) { NSWorkspace.shared.open(url) } }
     @objc private func renameContext() { if let url = contextURL { beginRename(url) } }
     @objc private func copyContext() {
         guard let url = contextURL else { return }
@@ -524,12 +525,17 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
         finishRename(commit: true)
     }
     @objc private func revealContext() {
-        if let url = contextURL {
+        if let url = existingURL(contextURL) {
             onRevealRequested?([url])
             NSWorkspace.shared.activateFileViewerSelecting([url])
             // Restore ordinary list ownership after Finder has selected it.
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.onRevealEnded?([url]) }
         }
+    }
+
+    private func existingURL(_ url: URL?) -> URL? {
+        guard let url, !FolderFileOperations.entryIsMissing(at: url) else { return nil }
+        return url
     }
 
     private func accepts(_ sender: NSDraggingInfo) -> NSDragOperation {

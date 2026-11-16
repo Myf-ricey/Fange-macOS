@@ -733,7 +733,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let updateButton = NSButton(title: "检查更新…", target: appDelegate, action: #selector(AppDelegate.checkForUpdates))
         updateButton.bezelStyle = .rounded
         updateButton.toolTip = "检查作者在 GitHub 发布的新版本"
-        let footer = NSStackView(views: [editButton, collapseButton, updateButton, NSView(), statusLabel])
+        let recoveryButton = NSButton(title: "恢复文件夹…", target: self, action: #selector(showRecoveryMenu(_:)))
+        recoveryButton.bezelStyle = .rounded
+        recoveryButton.toolTip = "保存分区布局和文件替身，退出饭格后也可在访达中打开"
+        let footer = NSStackView(views: [editButton, collapseButton, updateButton, recoveryButton, NSView(), statusLabel])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 10
@@ -889,6 +892,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func launchAtLoginChanged() {
         appDelegate?.setLaunchAtLoginEnabled(launchAtLoginCheckbox.state == .on)
+    }
+
+    @objc private func showRecoveryMenu(_ sender: NSButton) {
+        guard let appDelegate else { return }
+        let menu = NSMenu()
+        let location = menu.addItem(withTitle: appDelegate.recoveryFolderURL.path, action: nil, keyEquivalent: "")
+        location.isEnabled = false
+        for (title, action) in [
+            ("保存当前布局并在访达中打开", #selector(AppDelegate.openRecoveryFolder)),
+            ("选择保存位置…", #selector(AppDelegate.chooseRecoveryFolder)),
+            ("使用默认位置", #selector(AppDelegate.resetRecoveryFolder))
+        ] {
+            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = appDelegate
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.minY), in: sender)
     }
 
     @objc private func showHelp(_ sender: NSButton) {

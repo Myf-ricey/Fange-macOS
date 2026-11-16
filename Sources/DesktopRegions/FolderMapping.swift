@@ -15,6 +15,12 @@ enum FolderFileOperations {
         return lstat(url.path, &info) == 0
     }
 
+    static func entryIsMissing(at url: URL) -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) != 0 else { return false }
+        return errno == ENOENT || errno == ENOTDIR
+    }
+
     static func error(_ message: String) -> NSError {
         NSError(domain: "DesktopRegions.Files", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: message])

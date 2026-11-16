@@ -24,7 +24,8 @@ enum DesktopArranger {
         _ urls: [URL],
         toSlotIndices slotIndices: [Int],
         in region: Region,
-        screen: NSScreen
+        screen: NSScreen,
+        ignoringMissingItems: Bool = false
     ) -> Error? {
         guard urls.count == slotIndices.count else {
             return NSError(
@@ -59,10 +60,25 @@ enum DesktopArranger {
         let commands = pairs.map { url, slotIndex -> String in
             let path = appleScriptString(url.lastPathComponent)
             let point = positions[slotIndex]
-            return "set theItem to item \"\(path)\" of desktop\nset desktop position of theItem to {\(point.x), \(point.y)}"
+            let command = "set theItem to item \"\(path)\" of desktop\nset desktop position of theItem to {\(point.x), \(point.y)}"
+            guard ignoringMissingItems else { return command }
+            // The item can disappear between the disk check and this Apple
+            // event. Keep processing the rest of the batch if Finder lost it.
+            return """
+                try
+                    \(command)
+                on error errorText number errorCode
+                    if errorCode is not in {-43, -1728} then error errorText number errorCode
+                end try
+                """
         }
         let source = "tell application \"Finder\"\n" + commands.joined(separator: "\n") + "\nend tell"
         return execute(source)
+    }
+
+    static func isMissingItemError(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == "DesktopRegions.Finder" && [-43, -1728].contains(error.code)
     }
 
     static func moveDesktopItems(
