@@ -1,20 +1,31 @@
 // Copyright 2026 Myf-ricey
 // SPDX-License-Identifier: Apache-2.0
 
+// Copyright 2026 Myf-ricey
+// SPDX-License-Identifier: Apache-2.0
+
 import Cocoa
 
 private final class GitHubFixtureProtocol: URLProtocol {
     static var payload = Data()
     static var status = 200
     static var failure: Error?
+    static var reply: ((URL) throws -> (status: Int, data: Data))?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        if let error = Self.failure { client?.urlProtocol(self, didFailWithError: error); return }
-        let response = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Self.payload)
-        client?.urlProtocolDidFinishLoading(self)
+        do {
+            if let error = Self.failure { throw error }
+            let url = request.url!
+            let (status, payload) = try Self.reply?(url) ?? (Self.status, Self.payload)
+            let headers = ["Content-Type": "application/octet-stream", "Content-Length": String(payload.count)]
+            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: payload)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
     }
     override func stopLoading() {}
 }
@@ -101,6 +112,7 @@ struct UpdateTests {
         try UpdateInstaller.run(keka, ["--ignore-file-access", "--cli", "7z", "t", archive.path])
         try UpdateInstaller.validateArchive(archive)
         check(try UpdatePolicy.sha256(of: archive).count == 64)
+        try await verifyDownloadRecovery(using: archive, in: root)
         let workspace = root.appendingPathComponent("workspace", isDirectory: true)
         try fm.createDirectory(at: workspace, withIntermediateDirectories: true)
         let request = try UpdateInstaller.prepare(archive: archive, workspace: workspace, target: installed, releaseTag: "v0.3.0")
@@ -180,5 +192,99 @@ struct UpdateTests {
                 print("real GitHub asset download, digest, archive and application verification (no installation): PASS")
             }
         }
+    }
+
+    @MainActor private static func verifyDownloadRecovery(using archive: URL, in root: URL) async throws {
+        let manager = FileManager.default
+        let contents = try Data(contentsOf: archive)
+        let digest = try UpdatePolicy.sha256(of: archive)
+        let packageName = "Fange-v0.3.0-macOS-universal.zip"
+        let checksumName = "SHA256SUMS.txt"
+        let downloadBase = "https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.3.0/"
+        let package = GitHubRelease.Asset(
+            name: packageName, browser_download_url: downloadBase + packageName, size: Int64(contents.count), digest: nil
+        )
+        let checksumContents = Data("\(digest)  \(packageName)\n".utf8)
+        let checksum = GitHubRelease.Asset(
+            name: checksumName, browser_download_url: downloadBase + checksumName, size: Int64(checksumContents.count), digest: nil
+        )
+        let release = GitHubRelease(tag_name: "v0.3.0", name: nil, body: nil,
+            html_url: "https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.3.0",
+            draft: false, prerelease: true, assets: [package, checksum])
+        let fallbackChecksum = UpdatePolicy.latest(in: [release])!
+        let packageWithDigest = GitHubRelease.Asset(name: package.name, browser_download_url: package.browser_download_url,
+                                                    size: package.size, digest: "sha256:\(digest)")
+        let embeddedChecksum = AvailableUpdate(release: release, asset: packageWithDigest, checksumAsset: checksum)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [GitHubFixtureProtocol.self]
+        let service = GitHubUpdateService(session: URLSession(configuration: config))
+        defer { GitHubFixtureProtocol.reply = nil }
+        func workspace(_ name: String) throws -> URL {
+            let url = root.appendingPathComponent(name, isDirectory: true)
+            try manager.createDirectory(at: url, withIntermediateDirectories: false)
+            return url
+        }
+
+        var requested: [String] = []
+        var retries: [UpdateDownloadStage] = []
+        GitHubFixtureProtocol.reply = { url in
+            let name = url.lastPathComponent
+            requested.append(name)
+            if requested.filter({ $0 == name }).count == 1 { throw URLError(.timedOut) }
+            return (200, name == checksumName ? checksumContents : contents)
+        }
+        let downloaded = try await service.download(fallbackChecksum, to: workspace("transient-download")) { retries.append($0) }
+        let downloadedContents = try Data(contentsOf: downloaded)
+        precondition(downloadedContents == contents)
+        precondition(requested == [checksumName, checksumName, packageName, packageName])
+        precondition(retries == [.checksum, .package])
+        print("one transient timeout per download stage recovers and the ZIP passes SHA-256: PASS")
+
+        requested.removeAll()
+        retries.removeAll()
+        let unreachable = try workspace("unreachable-download")
+        GitHubFixtureProtocol.reply = { url in
+            requested.append(url.lastPathComponent)
+            let redirect = URL(string: "https://release-assets.githubusercontent.com/fange")
+            throw URLError(.timedOut, userInfo: [NSURLErrorFailingURLErrorKey: redirect!])
+        }
+        do {
+            _ = try await service.download(embeddedChecksum, to: unreachable) { retries.append($0) }
+            preconditionFailure("persistent download timeout must fail")
+        } catch let error as UpdateDownloadNetworkError {
+            precondition(error.stage == .package && error.underlyingError.code == .timedOut)
+            precondition(error.host == "release-assets.githubusercontent.com")
+            precondition(error.localizedDescription.contains("-1001"))
+        }
+        precondition(requested == [packageName, packageName] && retries == [.package])
+        precondition(!manager.fileExists(atPath: unreachable.appendingPathComponent("update.zip").path))
+        print("persistent timeout stops after one retry and names the download stage, host and error code: PASS")
+
+        requested.removeAll()
+        let cancelledFolder = try workspace("cancelled-download")
+        let cancelled = Task {
+            try await service.download(embeddedChecksum, to: cancelledFolder) { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        do {
+            _ = try await cancelled.value
+            preconditionFailure("cancelled download must fail")
+        } catch is CancellationError {}
+        precondition(requested == [packageName])
+
+        requested.removeAll()
+        GitHubFixtureProtocol.reply = { url in
+            requested.append(url.lastPathComponent)
+            return (403, Data())
+        }
+        do {
+            _ = try await service.download(embeddedChecksum, to: workspace("forbidden-download"))
+            preconditionFailure("forbidden download must fail")
+        } catch {
+            precondition(error.localizedDescription.contains("下载安装包失败") && error.localizedDescription.contains("403"))
+        }
+        precondition(requested == [packageName])
+        print("cancellation stops the retry and HTTP rejection retains the download stage: PASS")
     }
 }

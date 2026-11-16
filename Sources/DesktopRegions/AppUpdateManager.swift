@@ -135,7 +135,14 @@ final class AppUpdateManager: NSObject {
             do {
                 let directory = try UpdateInstaller.makeWorkspace()
                 workspace = directory
-                let archive = try await self.service.download(update, to: directory)
+                let archive = try await self.service.download(update, to: directory) { [weak self] stage in
+                    guard let self, self.operationID == id, !Task.isCancelled else { return }
+                    self.dialog?.progress(
+                        title: "正在重试下载",
+                        detail: "\(update.release.tag_name)\n正在重新连接 GitHub 以下载\(stage.title)…",
+                        cancellable: true
+                    )
+                }
                 try Task.checkCancellation()
                 self.dialog?.progress(title: "正在准备安装", detail: "正在检查应用版本、签名与当前安装位置…", cancellable: true)
                 let target = Bundle.main.bundleURL
@@ -155,8 +162,12 @@ final class AppUpdateManager: NSObject {
             } catch {
                 self.installing = false
                 guard !Task.isCancelled else { return }
-                self.dialog?.present(title: "更新未完成", detail: "\(error.localizedDescription)\n\n旧版本与分区设置保持不变。",
-                    primary: "重试", secondary: "关闭", action: { [weak self] in
+                let browserDownload = error is UpdateDownloadNetworkError ? update.downloadURL : nil
+                let nextStep = browserDownload == nil
+                    ? "旧版本与分区设置保持不变。"
+                    : "也可以用浏览器下载安装包。下载后从菜单栏退出饭格，再解压并替换正在使用的饭格.app。"
+                self.dialog?.present(title: "更新未完成", detail: "\(error.localizedDescription)\n\n\(nextStep)",
+                    primary: "重试", secondary: "关闭", browserDownloadURL: browserDownload, action: { [weak self] in
                         DispatchQueue.main.async { self?.install(update) }
                     })
             }
@@ -173,6 +184,7 @@ private final class UpdateDialogController: NSWindowController, NSWindowDelegate
     private let secondary = NSButton(title: "关闭", target: nil, action: nil)
     private let details = NSButton(title: "GitHub 发布页", target: nil, action: nil)
     private var primaryAction: (() -> Void)?
+    private var browserDownloadURL: URL?
     private var cancellable = true
     var onCancel: (() -> Void)?
     var onDetails: (() -> Void)?
@@ -226,7 +238,8 @@ private final class UpdateDialogController: NSWindowController, NSWindowDelegate
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func show() { NSApp.activate(ignoringOtherApps: true); window?.makeKeyAndOrderFront(nil) }
-    func present(title: String, detail text: String, primary titleText: String, secondary secondaryText: String? = nil, action: @escaping () -> Void) {
+    func present(title: String, detail text: String, primary titleText: String,
+                 secondary secondaryText: String? = nil, browserDownloadURL: URL? = nil, action: @escaping () -> Void) {
         cancellable = true
         window?.standardWindowButton(.closeButton)?.isEnabled = true
         heading.stringValue = title
@@ -236,6 +249,8 @@ private final class UpdateDialogController: NSWindowController, NSWindowDelegate
         primary.title = titleText; primary.isHidden = false; primary.isEnabled = true
         secondary.title = secondaryText ?? "关闭"; secondary.isHidden = secondaryText == nil; secondary.isEnabled = true
         primaryAction = action
+        self.browserDownloadURL = browserDownloadURL
+        details.title = browserDownloadURL == nil ? "GitHub 发布页" : "用浏览器下载安装包"
     }
     func progress(title: String, detail text: String, cancellable: Bool) {
         self.cancellable = cancellable
@@ -245,10 +260,15 @@ private final class UpdateDialogController: NSWindowController, NSWindowDelegate
         secondary.isHidden = false; secondary.title = "取消"; secondary.isEnabled = cancellable
         window?.standardWindowButton(.closeButton)?.isEnabled = cancellable
         primaryAction = nil
+        browserDownloadURL = nil
+        details.title = "GitHub 发布页"
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { cancellable }
     func windowWillClose(_ notification: Notification) { onCancel?() }
     @objc private func primaryPressed() { primaryAction?() }
     @objc private func closePressed() { guard cancellable else { return }; close() }
-    @objc private func detailsPressed() { onDetails?() }
+    @objc private func detailsPressed() {
+        if let url = browserDownloadURL { NSWorkspace.shared.open(url) }
+        else { onDetails?() }
+    }
 }

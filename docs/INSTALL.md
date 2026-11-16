@@ -7,8 +7,8 @@
 
 ## 安装
 
-1. 打开项目的 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.2.4)。
-2. 下载 `Fange-v0.2.4-macOS-universal.zip`。
+1. 打开项目的 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases)。
+2. 在最新饭格 Beta 的 Assets 中下载文件名以 `-macOS-universal.zip` 结尾的安装包。
 3. 解压 ZIP，把“饭格.app”拖入“应用程序”。
 
 ## 当前 Beta 的首次打开方式
@@ -39,6 +39,8 @@
 点击设置窗口中分区的文件夹按钮，主动选择映射目录。macOS 如询问桌面、文稿或下载目录访问权限，请按实际使用需求允许。
 
 0.2.4 起可通过菜单栏“检查更新…”下载安装新版本；每次启动也会检查一次。旧版 0.1.0 没有内置更新，请先正常退出旧版，再用本次下载的 App 替换。分区配置保存在 App 外，替换 App 不会清空配置。
+
+一键更新连接超时时，可从发布页用浏览器下载官方 ZIP。0.2.9 起，下载连接持续失败时也可点「用浏览器下载安装包」。下载后从饭格菜单栏退出旧版，解压 ZIP，再用新的 `饭格.app` 替换正在使用的副本。
 
 当前构建使用 ad-hoc 签名，尚未完成 Developer ID 签名与公证，更新后系统仍可能要求确认打开。应用目录不可写时，请使用手动替换方式。
 

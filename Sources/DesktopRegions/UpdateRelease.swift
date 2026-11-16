@@ -71,6 +71,9 @@ struct AvailableUpdate {
     let checksumAsset: GitHubRelease.Asset?
     var version: UpdateVersion { release.version! }
     var canInstall: Bool { asset != nil && (UpdatePolicy.digest(from: asset?.digest) != nil || checksumAsset != nil) }
+    var downloadURL: URL? {
+        asset.flatMap { UpdatePolicy.trustedReleaseURL($0.browser_download_url, asset: true) }
+    }
 }
 
 enum UpdatePolicy {
@@ -141,7 +144,32 @@ enum UpdatePolicy {
     }
 }
 
+enum UpdateDownloadStage: Equatable {
+    case checksum
+    case package
+
+    var title: String {
+        switch self {
+        case .checksum: return "校验文件"
+        case .package: return "安装包"
+        }
+    }
+}
+
+struct UpdateDownloadNetworkError: LocalizedError {
+    let stage: UpdateDownloadStage
+    let host: String
+    let underlyingError: URLError
+
+    var errorDescription: String? {
+        "未能下载\(stage.title)（\(host)，错误码 \(underlyingError.code.rawValue)）。\(underlyingError.localizedDescription)"
+    }
+}
+
 final class GitHubUpdateService {
+    private static let transientErrors: Set<URLError.Code> = [
+        .timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed
+    ]
     private let session: URLSession
     init(session: URLSession? = nil) {
         if let session { self.session = session } else {
@@ -158,9 +186,12 @@ final class GitHubUpdateService {
         request.setValue("2026-03-10", forHTTPHeaderField: "X-GitHub-Api-Version")
         return request
     }
-    private func validate(_ response: URLResponse) throws {
+    private func validate(_ response: URLResponse, downloadStage: UpdateDownloadStage? = nil) throws {
         guard let http = response as? HTTPURLResponse else { throw UpdatePolicy.error("更新服务器没有返回有效响应。") }
         guard http.statusCode == 200 else {
+            if let downloadStage {
+                throw UpdatePolicy.error("下载\(downloadStage.title)失败（GitHub HTTP \(http.statusCode)）。")
+            }
             if [403, 429].contains(http.statusCode) { throw UpdatePolicy.error("GitHub 暂时限制了检查频率，请稍后再试。") }
             throw UpdatePolicy.error("检查更新失败（GitHub HTTP \(http.statusCode)），请稍后重试。")
         }
@@ -177,23 +208,31 @@ final class GitHubUpdateService {
         guard let latest = UpdatePolicy.latest(in: releases) else { throw UpdatePolicy.error("GitHub 暂无可用的饭格发行版本。") }
         return latest
     }
-    func download(_ update: AvailableUpdate, to workspace: URL) async throws -> URL {
-        guard let asset = update.asset, let url = UpdatePolicy.trustedReleaseURL(asset.browser_download_url, asset: true) else {
+    func download(
+        _ update: AvailableUpdate,
+        to workspace: URL,
+        onRetry: @MainActor (UpdateDownloadStage) -> Void = { _ in }
+    ) async throws -> URL {
+        guard let asset = update.asset, let url = update.downloadURL else {
             throw UpdatePolicy.error("该版本没有适合这台 Mac 的 ZIP 安装包，请在 GitHub 查看。")
         }
         var expected = UpdatePolicy.digest(from: asset.digest)
         if expected == nil, let checksum = update.checksumAsset,
            let checksumURL = UpdatePolicy.trustedReleaseURL(checksum.browser_download_url, asset: true) {
-            let (data, response) = try await session.data(for: request(checksumURL))
-            try validate(response)
+            let (data, response) = try await retryingDownload(.checksum, from: checksumURL, onRetry: onRetry) {
+                try await session.data(for: request(checksumURL))
+            }
+            try validate(response, downloadStage: .checksum)
             guard data.count < 1024 * 1024, let text = String(data: data, encoding: .utf8) else { throw UpdatePolicy.error("校验文件无效。") }
             expected = UpdatePolicy.checksum(in: text, filename: asset.name)
         }
         guard let expected else { throw UpdatePolicy.error("发布者尚未提供 SHA-256 校验信息，请前往 GitHub 手动安装。") }
         try Task.checkCancellation()
-        let (temporary, response) = try await session.download(for: request(url))
+        let (temporary, response) = try await retryingDownload(.package, from: url, onRetry: onRetry) {
+            try await session.download(for: request(url))
+        }
         defer { try? FileManager.default.removeItem(at: temporary) }
-        try validate(response)
+        try validate(response, downloadStage: .package)
         let bytes = try temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         guard bytes > 0, bytes <= UpdatePolicy.maximumPackageBytes, Int64(bytes) == asset.size else {
             throw UpdatePolicy.error("安装包大小不符或下载不完整，请重新检查更新。")
@@ -205,5 +244,30 @@ final class GitHubUpdateService {
         let archive = workspace.appendingPathComponent("update.zip")
         try FileManager.default.moveItem(at: temporary, to: archive)
         return archive
+    }
+
+    private func retryingDownload<Value>(
+        _ stage: UpdateDownloadStage,
+        from url: URL,
+        onRetry: @MainActor (UpdateDownloadStage) -> Void,
+        operation: () async throws -> Value
+    ) async throws -> Value {
+        do {
+            do {
+                return try await operation()
+            } catch let error as URLError where Self.transientErrors.contains(error.code) {
+                try Task.checkCancellation()
+                await onRetry(stage)
+                try await Task.sleep(nanoseconds: 500_000_000)
+                return try await operation()
+            }
+        } catch let error as URLError {
+            try Task.checkCancellation()
+            throw UpdateDownloadNetworkError(
+                stage: stage,
+                host: error.failingURL?.host ?? url.host ?? "github.com",
+                underlyingError: error
+            )
+        }
     }
 }
