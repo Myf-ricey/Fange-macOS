@@ -3,6 +3,10 @@
 
 import Cocoa
 
+private final class RegionSettingsDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 final class RegionAdvancedWindowController: NSWindowController {
     private weak var appDelegate: AppDelegate?
     private let regionID: UUID
@@ -48,28 +52,55 @@ final class RegionAdvancedWindowController: NSWindowController {
         self.regionID = region.id
         self.appDelegate = appDelegate
 
+        let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
+        let visibleHeight = NSScreen.main.map {
+            NSWindow.contentRect(forFrameRect: $0.visibleFrame, styleMask: style).height
+        } ?? 848
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 848),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: min(848, visibleHeight)),
+            styleMask: style,
             backing: .buffered,
             defer: false
         )
         window.title = "\(region.name) · 更多设置"
         window.isReleasedWhenClosed = false
         window.level = .normal
-        window.center()
+        window.contentMinSize = NSSize(width: 460, height: 320)
         super.init(window: window)
 
         sortControls.onChange = { [weak self] options in
             guard let self else { return }
             self.appDelegate?.mutateRegion(id: self.regionID, actionName: "修改文件排序") { $0.fileSort = options }
         }
-        window.contentView = makeContentView()
+        let scrollView = NSScrollView(frame: window.contentLayoutRect)
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        let form = makeFormView()
+        let document = RegionSettingsDocumentView(frame: form.frame)
+        document.frame.size.width = scrollView.contentSize.width
+        document.autoresizingMask = [.width]
+        form.frame = document.bounds
+        form.autoresizingMask = [.width]
+        document.addSubview(form)
+        scrollView.documentView = document
+        window.contentView = scrollView
+
+        let frameName = "DesktopRegionsAdvancedSettingsWindow"
+        if !window.setFrameUsingName(frameName) {
+            window.center()
+        }
+        window.setFrameAutosaveName(frameName)
         update(with: region)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func close() {
+        super.close()
+        window?.setFrameAutosaveName("")
     }
 
     func update(with region: Region) {
@@ -138,7 +169,7 @@ final class RegionAdvancedWindowController: NSWindowController {
         }
     }
 
-    private func makeContentView() -> NSView {
+    private func makeFormView() -> NSView {
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 820))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -146,6 +177,7 @@ final class RegionAdvancedWindowController: NSWindowController {
         let heading = NSTextField(labelWithString: "分区外观与网格")
         heading.font = NSFont.systemFont(ofSize: 22, weight: .bold)
         heading.frame = NSRect(x: 28, y: 778, width: 464, height: 30)
+        heading.autoresizingMask = [.width]
         root.addSubview(heading)
 
         addSectionTitle("风格方案", y: 746, to: root)
@@ -233,6 +265,7 @@ final class RegionAdvancedWindowController: NSWindowController {
         fileSectionTitle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         fileSectionTitle.textColor = .secondaryLabelColor
         fileSectionTitle.frame = NSRect(x: 28, y: 208, width: 464, height: 20)
+        fileSectionTitle.autoresizingMask = [.width]
         root.addSubview(fileSectionTitle)
         configureStepper(columnsStepper, action: #selector(columnsChanged))
         configureStepper(rowsStepper, action: #selector(rowsChanged))
@@ -287,7 +320,8 @@ final class RegionAdvancedWindowController: NSWindowController {
 
         spacingHint.font = NSFont.systemFont(ofSize: 11)
         spacingHint.textColor = .secondaryLabelColor
-        spacingHint.frame = NSRect(x: 184, y: 42, width: 290, height: 34)
+        spacingHint.frame = NSRect(x: 184, y: 42, width: 290, height: 42)
+        spacingHint.autoresizingMask = [.width]
         root.addSubview(spacingHint)
 
         restoreDefaultsButton.target = self
@@ -296,6 +330,7 @@ final class RegionAdvancedWindowController: NSWindowController {
         restoreDefaultsButton.controlSize = .regular
         restoreDefaultsButton.toolTip = "恢复新增分区的默认外观与网格；名称、位置和透明度不变"
         restoreDefaultsButton.frame = NSRect(x: 354, y: 8, width: 120, height: 30)
+        restoreDefaultsButton.autoresizingMask = [.minXMargin]
         root.addSubview(restoreDefaultsButton)
 
         return root
@@ -306,6 +341,7 @@ final class RegionAdvancedWindowController: NSWindowController {
         label.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         label.textColor = .secondaryLabelColor
         label.frame = NSRect(x: 28, y: y, width: 464, height: 20)
+        label.autoresizingMask = [.width]
         root.addSubview(label)
     }
 
@@ -322,9 +358,17 @@ final class RegionAdvancedWindowController: NSWindowController {
         stack.alignment = .centerY
         stack.spacing = 10
         stack.distribution = .fill
-        stack.frame = NSRect(x: 184, y: 0, width: 290, height: 30)
-        controls.first?.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        stack.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 184),
+            stack.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ])
+        if let slider = controls.first as? NSSlider {
+            slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -46).isActive = true
+        }
+        row.autoresizingMask = [.width]
         root.addSubview(row)
         return row
     }
@@ -334,7 +378,7 @@ final class RegionAdvancedWindowController: NSWindowController {
         slider.action = action
         slider.isContinuous = true
         slider.controlSize = .small
-        slider.widthAnchor.constraint(equalToConstant: 168).isActive = true
+        slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
     }
 
     private func configureNumericStepper(

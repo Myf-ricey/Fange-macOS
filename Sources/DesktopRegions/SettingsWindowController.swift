@@ -11,7 +11,6 @@ private final class EdgeTabPanel: NSPanel {
 private enum SettingsTableLayout {
     static let duplicateWidth: CGFloat = 52
     static let colorWidth: CGFloat = 76
-    static let opacityWidth: CGFloat = 214
     static let mappingWidth: CGFloat = 76
     static let collapseWidth: CGFloat = 76
     static let viewWidth: CGFloat = 100
@@ -27,10 +26,9 @@ private enum SettingsTableLayout {
         view: NSRect,
         more: NSRect
     ) {
-        let nameWidth = max(
-            190,
-            bounds.width - duplicateWidth - colorWidth - opacityWidth - moreWidth - mappingWidth - collapseWidth - viewWidth
-        )
+        let flexibleWidth = bounds.width - duplicateWidth - colorWidth - moreWidth - mappingWidth - collapseWidth - viewWidth
+        let opacityWidth = min(214, max(150, flexibleWidth - 140))
+        let nameWidth = max(140, flexibleWidth - opacityWidth)
         let duplicate = NSRect(x: 0, y: 0, width: duplicateWidth, height: bounds.height)
         let color = NSRect(x: duplicate.maxX, y: 0, width: colorWidth, height: bounds.height)
         let name = NSRect(x: color.maxX, y: 0, width: nameWidth, height: bounds.height)
@@ -392,12 +390,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.title = "饭格"
         window.level = .normal
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 1040, height: 540)
-        window.setFrameAutosaveName("DesktopRegionsSettingsWindow")
+        window.contentMinSize = NSSize(width: 820, height: 360)
         super.init(window: window)
-        window.delegate = self
         window.contentView = makeContentView()
-        window.center()
+        let frameName = "DesktopRegionsSettingsWindow"
+        if !window.setFrameUsingName(frameName) {
+            window.center()
+        }
+        window.setFrameAutosaveName(frameName)
+        window.delegate = self
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenParametersChanged),
@@ -479,6 +480,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func showAdvancedSettings(for id: UUID) {
         guard let appDelegate, let region = appDelegate.store.region(id: id) else { return }
         advancedEditor?.close()
+        advancedEditor = nil
         let controller = RegionAdvancedWindowController(region: region, appDelegate: appDelegate)
         advancedEditor = controller
         controller.showWindow(nil)
@@ -525,7 +527,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func expandFromEdge() {
         guard let window else { return }
         edgePanel?.orderOut(nil)
-        if let expandedFrame {
+        if visibilityState == .collapsed, let expandedFrame {
             let screen = screen(containing: expandedFrame)
                 ?? window.screen
                 ?? NSScreen.main
@@ -804,7 +806,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         let instructions = [
             ("普通模式", "直接双击或拖动 Finder 桌面图标。把图标松到分区内后，它会吸附到该分区预设的网格位置。"),
-            ("编辑与设置窗口", "点击“进入编辑模式”后拖动分区空白处可移动，拖右下角可缩放；设置窗会自动收回到右侧。也可手动点击“收起到右侧”，再点屏幕右侧的 < 标签召回。窗口仍保留标准红黄绿按钮，切换其他 App 时不会自动关闭。"),
+            ("编辑与设置窗口", "拖动主设置或“更多设置”的窗口边缘可调整大小，窗口较矮时可滚动。进入编辑模式后，可拖动分区空白处移动分区，拖右下角调整分区大小。主设置会收起到屏幕右侧，点击 < 标签可召回。"),
             ("映射文件夹", "点击灰色文件夹图标选择目录。蓝色图标表示已映射，可更换、打开或解除映射。内容实时刷新，超出分区时向下滚动；拖入文件会移动到真实目录，同名文件不会被覆盖。"),
             ("文件排序", "点击映射或列表分区的三个点，在“文件排序”区域选择排序依据、升降序和文件夹优先。规则独立保存并立即生效，也可在文件区右键 → 排序方式，或从菜单栏的分区子菜单设置。"),
             ("检查更新", "菜单栏或设置底部点击“检查更新…”，查看 GitHub 新版本与更新说明，并一键下载、校验、覆盖安装和重启。每次启动自动检查一次，无更新时保持安静。"),
