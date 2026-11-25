@@ -78,6 +78,20 @@ struct FolderFeaturesTests {
         check(RegionFileSorting.sorted(inputs, by: RegionFileSort(key: .name, ascending: false, foldersFirst: false)).first == folder)
         print("natural names, metadata sorting, descending order, independent folder priority: PASS")
 
+        let package = try directory("Package.app")
+        let folderLink = sorting.appendingPathComponent("Folder link")
+        try fm.createSymbolicLink(at: folderLink, withDestinationURL: folder)
+        check(FolderFileOperations.isDropFolder(folder) && !FolderFileOperations.isDropFolder(package)
+              && !FolderFileOperations.isDropFolder(f1) && !FolderFileOperations.isDropFolder(folderLink))
+        let dropView = RegionFilesView(frame: NSRect(x: 0, y: 0, width: 208, height: 224))
+        dropView.urls = [f1, folder]
+        check(dropView.dropItem(at: NSPoint(x: 156, y: 38)) == folder)
+        check(dropView.dropItem(at: NSPoint(x: 156, y: 82)) == folder)
+        check(dropView.dropItem(at: NSPoint(x: 109, y: 40)) == nil)
+        dropView.mode = .list
+        check(dropView.dropItem(at: NSPoint(x: 185, y: 46)) == folder)
+        print("folder icon, label and list row drop targets; blank space and package exclusions: PASS")
+
         let sortControls = RegionSortControls()
         var sortChanges: [RegionFileSort] = []
         sortControls.onChange = { sortChanges.append($0) }
@@ -130,6 +144,18 @@ struct FolderFeaturesTests {
         try fm.createSymbolicLink(at: target.appendingPathComponent("collision"), withDestinationURL: root.appendingPathComponent("missing"))
         rejects { _ = try FolderFileOperations.planMove([collision], into: target) }
         print("real moves, rollback, no overwrite, self/descendant rejection, symlink preservation: PASS")
+
+        rejects { _ = try FolderFileOperations.planMove([source], into: nested, copying: true) }
+        let copyPlan = try FolderFileOperations.planMove([one], into: target, copying: true)
+        let copied = try FolderFileOperations.copy(copyPlan, into: target)
+        let copyURL = URL(fileURLWithPath: copied[0].destination)
+        try fm.moveItem(at: copyURL, to: target.appendingPathComponent("saved-copy.txt"))
+        _ = try write(copyURL.lastPathComponent, in: target, text: "replacement")
+        rejects { try FolderFileOperations.undo(copied) }
+        check(try String(contentsOf: copyURL, encoding: .utf8) == "replacement")
+        rejects { _ = try FolderFileOperations.copy(copyPlan, into: target) }
+        check(try String(contentsOf: copyURL, encoding: .utf8) == "replacement")
+        print("copy refuses recursive folders, late collisions and undo of a replaced copy: PASS")
 
         let renameFixture = try write("rename.txt", in: source, text: "original")
         for invalid in ["", " ", "../escape", "sub/file", "a:b", ".hidden", "two.txt"] {

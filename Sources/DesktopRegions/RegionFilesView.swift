@@ -2,6 +2,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Cocoa
+import QuickLookUI
+
+enum RegionFileDrag {
+    static func operation(for sender: NSDraggingInfo) -> NSDragOperation {
+        let requested: NSDragOperation = NSEvent.modifierFlags.contains(.option) ? .copy : .move
+        return sender.draggingSourceOperationMask.contains(requested) ? requested : []
+    }
+}
+
+enum RegionFileClipboard {
+    static let marker = NSPasteboard.PasteboardType("com.ricey.desktop-regions.copied-files")
+
+    static func write(_ urls: [URL], to board: NSPasteboard) -> Bool {
+        guard !urls.isEmpty else { return false }
+        let items = urls.map { url -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            item.setString(url.absoluteString, forType: .fileURL)
+            item.setString("1", forType: marker)
+            return item
+        }
+        board.clearContents()
+        return board.writeObjects(items)
+    }
+}
 
 struct RegionFileAppearance {
     let icon: NSImage
@@ -86,13 +110,14 @@ final class RegionFileSelectionCoordinator {
             forName: NSWindow.didResignKeyNotification, object: nil, queue: nil
         ) { [weak self] notification in
             guard let self, let window = notification.object as? NSWindow else { return }
-            self.views.allObjects.filter { $0.window === window }.forEach { $0.clearSelection() }
+            self.views.allObjects.filter { $0.window === window && !$0.isPreviewing }.forEach { $0.clearSelection() }
         }
     }
 
     func register(_ view: RegionFilesView) { views.add(view) }
 
     func handleMouseDown(_ event: NSEvent) {
+        if event.window is QLPreviewPanel { return }
         for view in views.allObjects {
             // Use the actual hit view, not just the frame: a scroller, header,
             // resize handle or another window may own the click at that point.
@@ -113,7 +138,7 @@ final class RegionFileSelectionCoordinator {
 /// The scrollable file surface for mapped folders and ordinary list regions.
 /// All drag pasteboard entries are real URLs, so Finder and other apps can
 /// open/move the original entry without aliases or copied display files.
-final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
+final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var desktopLayout: BoundDesktopIconLayout? { didSet { if desktopLayout != oldValue { resizeContent() } } }
     var editsRegionLayout = false
     var mode: RegionDisplayMode = .icons { didSet { resizeContent() } }
@@ -123,6 +148,11 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
             let paths = Set(urls.map(\.path))
             if let renameURL, !paths.contains(renameURL.path) { finishRename(commit: false) }
             selectedPaths.formIntersection(paths)
+            if isPreviewing {
+                previewURLs = previewURLs.filter { paths.contains($0.path) }
+                if previewURLs.isEmpty { previewPanel?.close() }
+                else { previewPanel?.reloadData() }
+            }
             if let anchorIndex, oldValue.indices.contains(anchorIndex) {
                 self.anchorIndex = urls.firstIndex(of: oldValue[anchorIndex])
                     ?? (selectedPaths.count == 1 ? urls.firstIndex { selectedPaths.contains($0.path) } : nil)
@@ -135,13 +165,14 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
     var sortOptions = RegionFileSort()
     var onSortChanged: ((RegionFileSort) -> Void)?
     var message: String? { didSet { needsDisplay = true } }
-    var onFilesDropped: (([URL], NSPoint) -> Void)?
+    var onFilesDropped: (([URL], NSPoint, URL?, NSDragOperation) -> Bool)?
     var onDragStarted: (([URL]) -> Void)?
     var onDragMoved: ((NSPoint) -> Void)?
     var exportsBoundDesktopItems = false
     var onRevealRequested: (([URL]) -> Void)?
     var onRevealEnded: (([URL]) -> Void)?
     var onRename: ((URL, String) -> Void)?
+    var onCopy: (([URL]) -> Void)?
     var onDragEnded: (([URL], NSDragOperation) -> Void)?
     var onDropPreview: ((Bool) -> Void)?
     private(set) var selectedPaths = Set<String>()
@@ -153,9 +184,24 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
     private var draggedURLs: [URL] = []
     private var appearances: [String: RegionFileAppearance] = [:]
     private let appearanceLoader: (URL) -> RegionFileAppearance
+    private var previewURLs: [URL] = []
+    private weak var previewPanel: QLPreviewPanel?
+    var isPreviewing: Bool { !previewURLs.isEmpty }
+    private var selectedURLs: [URL] { urls.filter { selectedPaths.contains($0.path) } }
     private var contextURL: URL?
     private var anchorIndex: Int?
-    private var dropActive = false
+    private enum DropTarget: Equatable {
+        case background
+        case folder(URL)
+    }
+    private var acceptedFileOperation: NSDragOperation = []
+    private var dropTarget: DropTarget?
+    var highlightsDropFolder: Bool {
+        if case .folder = dropTarget { return true }
+        return false
+    }
+    private var incomingURLs: [URL] = []
+    private var hoveredItem: (url: URL, isFolder: Bool)?
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -174,6 +220,7 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func clearSelection() {
+        if isPreviewing { previewPanel?.close(); previewURLs = [] }
         finishRename(commit: true)
         anchorIndex = nil
         mouseDownPoint = nil
@@ -282,7 +329,7 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
             let rect = cell(i)
             guard rect.intersects(dirtyRect), !draggedURLs.contains(urls[i]) else { continue }
             let url = urls[i]
-            let selected = selectedPaths.contains(url.path)
+            let selected = selectedPaths.contains(url.path) || dropTarget == .folder(url)
             guard let appearance = appearances[url.path] else { continue }
             let iconRect = iconRect(at: i)
             if selected {
@@ -317,7 +364,7 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
             }
             (appearance.name as NSString).draw(in: textRect(at: i), withAttributes: attributes)
         }
-        if dropActive {
+        if dropTarget == .background {
             NSColor.controlAccentColor.withAlphaComponent(0.8).setStroke()
             let path = NSBezierPath(roundedRect: visibleRect.insetBy(dx: 2, dy: 2), xRadius: 9, yRadius: 9)
             path.lineWidth = 2
@@ -326,6 +373,7 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if isPreviewing { previewPanel?.close() }
         finishRename(commit: true)
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
@@ -368,10 +416,11 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
         guard !draggedURLs.isEmpty else { return }
         onDragStarted?(draggedURLs)
         needsDisplay = true
-        let items = draggedURLs.map { url -> NSDraggingItem in
+        let items = urls.indices.filter { selectedPaths.contains(urls[$0].path) }.map { index -> NSDraggingItem in
+            let url = urls[index]
             let item = NSDraggingItem(pasteboardWriter: url as NSURL)
-            item.setDraggingFrame(NSRect(x: point.x - 24, y: point.y - 24, width: 48, height: 48),
-                                  contents: appearances[url.path]?.icon)
+            let frame = iconRect(at: index).offsetBy(dx: point.x - start.x, dy: point.y - start.y)
+            item.setDraggingFrame(frame, contents: appearances[url.path]?.icon)
             return item
         }
         mouseDownPoint = nil
@@ -388,28 +437,117 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
         needsDisplay = true
     }
 
-    override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "a" {
-            selectedPaths = Set(urls.map(\.path)); needsDisplay = true
-        } else if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "c" {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.writeObjects(urls.filter { selectedPaths.contains($0.path) }.map { $0 as NSURL })
-        } else if event.keyCode == 36 {
-            urls.filter { selectedPaths.contains($0.path) }.compactMap { existingURL($0) }
-                .forEach { NSWorkspace.shared.open($0) }
-        } else { super.keyDown(with: event) }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self, handleFileCommand(event) else {
+            return super.performKeyEquivalent(with: event)
+        }
+        return true
     }
+
+    private func handleFileCommand(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard modifiers == .command, renameField == nil else { return false }
+        switch event.charactersIgnoringModifiers {
+        case "a":
+            selectedPaths = Set(urls.map(\.path))
+            needsDisplay = true
+        case "c": copyFiles(selectedURLs)
+        case "o": selectedURLs.compactMap { existingURL($0) }.forEach { NSWorkspace.shared.open($0) }
+        default: return false
+        }
+        return true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if handleFileCommand(event) { return }
+        if renameField == nil, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
+            if event.keyCode == 36, selectedPaths.count == 1, let url = selectedURLs.first {
+                beginRename(url)
+                return
+            }
+            if event.charactersIgnoringModifiers == " " {
+                if !event.isARepeat { togglePreview() }
+                return
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    private func togglePreview() {
+        if let previewPanel, previewPanel.isVisible {
+            previewPanel.close()
+            return
+        }
+        previewURLs = selectedURLs.compactMap { existingURL($0) }
+        guard !previewURLs.isEmpty, let panel = QLPreviewPanel.shared() else { return }
+        window?.makeKey()
+        window?.makeFirstResponder(self)
+        panel.updateController()
+        panel.makeKeyAndOrderFront(nil)
+        panel.currentPreviewItemIndex = 0
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { isPreviewing }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        previewPanel = panel
+        panel.dataSource = self
+        panel.delegate = self
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.delegate = nil
+        panel.dataSource = nil
+        previewPanel = nil
+        previewURLs = []
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        previewURLs = []
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { previewURLs.count }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        guard previewURLs.indices.contains(index) else { return nil }
+        return previewURLs[index] as NSURL
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return false }
+        switch event.keyCode {
+        case 49, 53:
+            if !event.isARepeat { panel.close() }
+        case 123, 124:
+            guard previewURLs.count > 1 else { return false }
+            let offset = event.keyCode == 123 ? -1 : 1
+            panel.currentPreviewItemIndex = max(0, min(previewURLs.count - 1, panel.currentPreviewItemIndex + offset))
+        default: return false
+        }
+        return true
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
         if let i = index(at: convert(event.locationInWindow, from: nil)) {
             let url = urls[i]
             contextURL = url
+            if !selectedPaths.contains(url.path) {
+                selectedPaths = [url.path]
+                anchorIndex = i
+                needsDisplay = true
+            }
             menu.addItem(withTitle: "打开", action: #selector(openContext), keyEquivalent: "").target = self
             if let openWith = openWithMenu(for: url) { menu.addItem(openWith) }
             if onRename != nil {
                 menu.addItem(withTitle: "重新命名", action: #selector(renameContext), keyEquivalent: "").target = self
             }
-            menu.addItem(withTitle: "拷贝", action: #selector(copyContext), keyEquivalent: "").target = self
+            let items = selectedURLs
+            let copy = menu.addItem(withTitle: items.count > 1 ? "拷贝 \(items.count) 个项目" : "拷贝",
+                                    action: #selector(copyContext(_:)), keyEquivalent: "")
+            copy.target = self
+            copy.representedObject = items
             if #available(macOS 13.0, *) {
                 menu.addItem(NSSharingServicePicker(items: [url]).standardShareMenuItem)
             }
@@ -449,10 +587,13 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
 
     @objc private func openContext() { if let url = existingURL(contextURL) { NSWorkspace.shared.open(url) } }
     @objc private func renameContext() { if let url = contextURL { beginRename(url) } }
-    @objc private func copyContext() {
-        guard let url = contextURL else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([url as NSURL])
+    @objc private func copyContext(_ sender: NSMenuItem) {
+        if let items = sender.representedObject as? [URL] { copyFiles(items) }
+    }
+
+    private func copyFiles(_ items: [URL]) {
+        guard !items.isEmpty else { return }
+        onCopy?(items)
     }
 
     private func renameFrame(at index: Int) -> NSRect {
@@ -538,24 +679,73 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate {
         return url
     }
 
-    private func accepts(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]),
-              sender.draggingSourceOperationMask.contains(.move) else { return [] }
-        dropActive = true; onDropPreview?(true); needsDisplay = true
-        return .move
+    private func readURLs(_ sender: NSDraggingInfo) -> [URL] {
+        sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
     }
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { accepts(sender) }
+
+    func dropItem(at point: NSPoint) -> URL? {
+        // Keep the space between icons available for assigning grid slots.
+        let hit = mode == .list ? index(at: point) : urls.indices.first {
+            iconRect(at: $0).contains(point) || isNameClick(point, at: $0)
+        }
+        return hit.map { urls[$0] }
+    }
+
+    private func target(for sender: NSDraggingInfo, sources: [URL]) -> DropTarget? {
+        guard !sources.isEmpty else { return nil }
+        guard let folder = dropItem(at: convert(sender.draggingLocation, from: nil)) else {
+            hoveredItem = nil
+            return .background
+        }
+        if hoveredItem?.url != folder {
+            hoveredItem = (folder, FolderFileOperations.isDropFolder(URL(fileURLWithPath: folder.path)))
+        }
+        guard hoveredItem?.isFolder == true else { return .background }
+        guard !sources.contains(where: { folder.path == $0.path || folder.path.hasPrefix($0.path + "/") })
+            else { return nil }
+        return .folder(folder)
+    }
+
+    private func updateTarget(_ target: DropTarget?) {
+        guard target != dropTarget else { return }
+        dropTarget = target
+        onDropPreview?(target == .background)
+        needsDisplay = true
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        hoveredItem = nil
+        incomingURLs = readURLs(sender)
+        return updateFileOperation(sender)
+    }
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         if let event = NSApp.currentEvent { autoscroll(with: event) }
-        return accepts(sender)
+        return updateFileOperation(sender)
+    }
+    private func updateFileOperation(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let operation = RegionFileDrag.operation(for: sender)
+        updateTarget(operation.isEmpty ? nil : target(for: sender, sources: incomingURLs))
+        acceptedFileOperation = dropTarget == nil ? [] : operation
+        return acceptedFileOperation
     }
     override func draggingExited(_ sender: NSDraggingInfo?) { clearDrop() }
     override func draggingEnded(_ sender: NSDraggingInfo) { clearDrop() }
-    private func clearDrop() { dropActive = false; onDropPreview?(false); needsDisplay = true }
+    private func clearDrop() {
+        updateTarget(nil)
+        acceptedFileOperation = []
+        incomingURLs = []
+        hoveredItem = nil
+    }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         defer { clearDrop() }
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty else { return false }
-        onFilesDropped?(urls, sender.draggingLocation)
-        return true
+        let sources = readURLs(sender)
+        // AppKit may deliver this callback after the user releases Option.
+        guard !acceptedFileOperation.isEmpty, let target = target(for: sender, sources: sources),
+              target == dropTarget else { return false }
+        switch target {
+        case .folder(let folder): return onFilesDropped?(sources, sender.draggingLocation, folder, acceptedFileOperation) ?? false
+        case .background: return onFilesDropped?(sources, sender.draggingLocation, nil, acceptedFileOperation) ?? false
+        }
     }
 }

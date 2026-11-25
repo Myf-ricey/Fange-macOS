@@ -144,6 +144,37 @@ struct SelectionTests {
         click(first, point: NSPoint(x: 150, y: 285))
         precondition(renameField() == nil && submittedNames == ["新名称.app", "点击空白保存.app"], "点空白也必须提交一次")
 
+        func key(_ characters: String, code: UInt16, flags: NSEvent.ModifierFlags = []) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: firstWindow.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
+        }
+        click(first)
+        first.keyDown(with: key("\r", code: 36))
+        let keyboardEditor = renameField()!.currentEditor() as! NSTextView
+        keyboardEditor.insertText("two names", replacementRange: NSRange(location: 0, length: keyboardEditor.string.utf16.count))
+        precondition(keyboardEditor.string == "two names" && !first.isPreviewing)
+        keyboardEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        click(first, point: NSPoint(x: 150, y: 40), modifiers: .command)
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        first.onCopy = { precondition(RegionFileClipboard.write($0, to: board)) }
+        func clipboardPaths() -> [String] {
+            (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []).map(\.path)
+        }
+        let group = Array(first.urls.prefix(2)).map(\.path)
+        first.keyDown(with: key("c", code: 8, flags: .command))
+        precondition(clipboardPaths() == group)
+        board.clearContents()
+        let groupMenu = first.menu(for: mouse(.rightMouseDown, in: first, at: NSPoint(x: 53, y: 40)))!
+        let groupCopy = groupMenu.item(withTitle: "拷贝 2 个项目")!
+        precondition(app.sendAction(groupCopy.action!, to: groupCopy.target, from: groupCopy) && clipboardPaths() == group)
+        let singleMenu = first.menu(for: mouse(.rightMouseDown, in: first, at: NSPoint(x: 250, y: 40)))!
+        let singleCopy = singleMenu.item(withTitle: "拷贝")!
+        precondition(app.sendAction(singleCopy.action!, to: singleCopy.target, from: singleCopy) &&
+                     clipboardPaths() == [first.urls[2].path])
+        print("Return rename, spaces in names, keyboard and multi-item context clipboard: PASS")
+
         let destination = URL(fileURLWithPath: "/tmp/新名称.app")
         click(first)
         first.followRename(from: first.urls[0], to: destination)

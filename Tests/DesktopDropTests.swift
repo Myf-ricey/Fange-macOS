@@ -80,6 +80,8 @@ struct DesktopDropTests {
         check(store.region(id: destination.id)!.itemBindings.isEmpty && movedInfo.st_flags & UInt32(UF_HIDDEN) == 0,
               "an external move unbinds the original path and restores visibility at the new location")
 
+        try verifyDesktopImport(in: root)
+        try verifyFolderDrops(in: root)
         try verifyQuitRecovery(in: root)
         if ProcessInfo.processInfo.environment["FANGE_LIVE_FINDER_MISSING_TEST"] == "1" {
             let missing = realDesktop.appendingPathComponent("FangeMissing-\(UUID().uuidString)")
@@ -132,6 +134,129 @@ struct DesktopDropTests {
             check(aliasValues.isAliasFile == true &&
                   FileManager.default.fileExists(atPath: aliasTarget.path), "alias identity and original application target are preserved")
         }
+    }
+
+    private static func verifyDesktopImport(in root: URL) throws {
+        let fm = FileManager.default
+        let desktop = root.appendingPathComponent("Import Desktop", isDirectory: true)
+        let source = desktop.appendingPathComponent("Source Folder", isDirectory: true)
+        let incomingFolder = source.appendingPathComponent("Attachments", isDirectory: true)
+        try fm.createDirectory(at: incomingFolder, withIntermediateDirectories: true)
+        let file = source.appendingPathComponent("Report.txt")
+        let child = incomingFolder.appendingPathComponent("Photo.txt")
+        try Data("report".utf8).write(to: file)
+        try Data("photo".utf8).write(to: child)
+        let store = RegionStore(fileURL: root.appendingPathComponent("desktop-import.json"))
+        let visibility = DesktopItemVisibility(journalURL: root.appendingPathComponent("import-hidden.json"), desktopURL: desktop)
+        var region = Region.defaultNewRegion(frame: NSRect(x: -5000, y: -5000, width: 400, height: 420))
+        region.itemBindings = [RegionItemBinding(path: source.path, slotIndex: 0)]
+        store.replace(with: [region])
+        let app = AppDelegate(store: store, desktopVisibility: visibility)
+        try visibility.synchronize(regions: [region])
+        let point = RegionLayout.globalSlotCenters(in: region)[1]
+        check(app.filesDropped([file, incomingFolder, child, file], into: region.id, near: point, folder: nil),
+              "ordinary region accepts items from inside a managed desktop folder")
+        let movedFile = desktop.appendingPathComponent(file.lastPathComponent)
+        let movedFolder = desktop.appendingPathComponent(incomingFolder.lastPathComponent)
+        waitUntil("batch import binds top-level items once, preserves the original slot, and uses the drop point") {
+            let bindings = store.region(id: region.id)?.itemBindings ?? []
+            return bindings.count == 3 && bindings.contains(region.itemBindings[0]) &&
+                bindings.contains(RegionItemBinding(path: movedFile.path, slotIndex: 1)) &&
+                bindings.contains(where: { $0.path == movedFolder.path })
+        }
+        let photo = try Data(contentsOf: movedFolder.appendingPathComponent(child.lastPathComponent))
+        check(isHidden(movedFile) && !fm.fileExists(atPath: file.path) && photo == Data("photo".utf8),
+              "real move preserves folder contents and uses managed desktop icons")
+        app.undoLastAction()
+        waitUntil("one undo restores the files, folder contents, visibility and prior bindings") {
+            store.region(id: region.id)?.itemBindings == region.itemBindings &&
+                fm.fileExists(atPath: file.path) && fm.fileExists(atPath: child.path) &&
+                !fm.fileExists(atPath: movedFile.path) && !fm.fileExists(atPath: movedFolder.path) &&
+                !isHidden(file) && !isHidden(incomingFolder)
+        }
+        check(app.filesDropped([source], into: region.id, near: point, folder: nil, operation: .copy),
+              "Option can duplicate a bound desktop folder into another slot")
+        let duplicate = desktop.appendingPathComponent("Source Folder 副本", isDirectory: true)
+        waitUntil("copy gets a new name and slot without releasing the original") {
+            store.region(id: region.id)?.itemBindings.count == 2 && isHidden(duplicate) &&
+            fm.fileExists(atPath: duplicate.appendingPathComponent("Attachments/Photo.txt").path)
+        }
+        app.undoLastAction()
+        waitUntil("undo removes only the new copy and preserves the selected original") {
+            store.region(id: region.id)?.itemBindings == region.itemBindings && !fm.fileExists(atPath: duplicate.path) &&
+            fm.fileExists(atPath: child.path)
+        }
+        try visibility.restoreAll()
+    }
+
+    private static func verifyFolderDrops(in root: URL) throws {
+        let fm = FileManager.default
+        let desktop = root.appendingPathComponent("FolderDropDesktop", isDirectory: true)
+        let folder = desktop.appendingPathComponent("Archive", isDirectory: true)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = desktop.appendingPathComponent("Report.txt")
+        let privateFile = desktop.appendingPathComponent("Private.txt")
+        for source in [file, privateFile] { try Data(source.lastPathComponent.utf8).write(to: source) }
+        check(lchflags(privateFile.path, UInt32(UF_HIDDEN)) == 0, "fixture includes a user-hidden file")
+
+        let store = RegionStore(fileURL: root.appendingPathComponent("folder-drop-regions.json"))
+        var region = Region.defaultNewRegion(frame: NSRect(x: -5000, y: -5000, width: 400, height: 420))
+        region.itemBindings = [file, folder, privateFile].enumerated().map {
+            RegionItemBinding(path: $1.path, slotIndex: $0)
+        }
+        let mappedRoot = root.appendingPathComponent("Mapped", isDirectory: true)
+        let subfolder = mappedRoot.appendingPathComponent("Child", isDirectory: true)
+        try fm.createDirectory(at: subfolder, withIntermediateDirectories: true)
+        var mapped = Region.defaultNewRegion(frame: region.frame.offsetBy(dx: 500, dy: 0))
+        mapped.mappedFolderPath = mappedRoot.path
+        mapped.displayMode = .list
+        store.replace(with: [region, mapped])
+        let visibility = DesktopItemVisibility(journalURL: root.appendingPathComponent("folder-drop-hidden.json"), desktopURL: desktop)
+        let delegate = AppDelegate(store: store, desktopVisibility: visibility)
+        delegate.endFileDrag(regionID: region.id, urls: [], operation: [])
+        check(isHidden(file) && isHidden(folder), "ordinary region presents both files as managed icons")
+        let board = NSPasteboard.withUniqueName()
+        delegate.copyFilesToClipboard([file, privateFile], board: board)
+        check(!isHidden(file) && isHidden(privateFile), "Finder clipboard readers get the original user visibility")
+        board.clearContents()
+        waitUntil("replacing the clipboard restores the managed icon") { isHidden(file) }
+        board.releaseGlobally()
+        let point = NSPoint(x: region.frame.midX, y: region.frame.midY)
+        check(!delegate.filesDropped([file], into: region.id, near: point, folder: subfolder),
+              "ordinary folder target must belong to the receiving region")
+        check(delegate.filesDropped([file, privateFile], into: region.id, near: point, folder: folder, operation: .copy),
+              "Option accepts a multi-file folder copy")
+        waitUntil("copy keeps the original bindings and preserves user visibility on each copy") {
+            isHidden(file) && store.regions.first?.itemBindings == region.itemBindings &&
+            fm.fileExists(atPath: folder.appendingPathComponent(file.lastPathComponent).path) &&
+            !isHidden(folder.appendingPathComponent(file.lastPathComponent)) &&
+            isHidden(folder.appendingPathComponent(privateFile.lastPathComponent))
+        }
+        // Isolate the later move test from these newly created copies.
+        try fm.removeItem(at: folder.appendingPathComponent(file.lastPathComponent))
+        try fm.removeItem(at: folder.appendingPathComponent(privateFile.lastPathComponent))
+        check(delegate.filesDropped([file, privateFile], into: region.id, near: point, folder: folder),
+              "ordinary region accepts a real multi-file folder move")
+        delegate.endFileDrag(regionID: region.id, urls: [file, privateFile], operation: .move)
+        waitUntil("moving clears source bindings and preserves the target folder's slot") {
+            store.region(id: region.id)?.itemBindings == [region.itemBindings[1]]
+        }
+        let visibleChildren = try fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
+        check(visibleChildren.map(\.lastPathComponent) == [file.lastPathComponent] &&
+              isHidden(folder.appendingPathComponent(privateFile.lastPathComponent)),
+              "default Finder visibility includes the moved file and preserves a user-hidden file")
+
+        let mappedFile = mappedRoot.appendingPathComponent("From mapped.txt")
+        try Data("mapped content".utf8).write(to: mappedFile)
+        let mappedPoint = NSPoint(x: mapped.frame.midX, y: mapped.frame.midY)
+        check(delegate.filesDropped([mappedFile], into: mapped.id, near: mappedPoint, folder: subfolder),
+              "mapped list accepts a file dropped onto its child folder")
+        let movedFile = subfolder.appendingPathComponent(mappedFile.lastPathComponent)
+        waitUntil("mapped file lands inside the pointed-at child folder") {
+            fm.fileExists(atPath: movedFile.path) && !fm.fileExists(atPath: mappedFile.path)
+        }
+        let contents = try Data(contentsOf: movedFile)
+        check(contents == Data("mapped content".utf8), "folder move preserves the original contents")
     }
 
     private static func verifyQuitRecovery(in root: URL) throws {

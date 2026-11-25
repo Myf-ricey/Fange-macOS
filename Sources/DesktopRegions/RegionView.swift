@@ -18,7 +18,7 @@ final class RegionView: NSView {
     var drawsMoreIndicator = true
     var onFrameChanged: ((NSRect) -> Void)?
     var onLiveFrameChanged: ((NSRect) -> Void)?
-    var onFilesDropped: (([URL], NSPoint) -> Void)?
+    var onFilesDropped: (([URL], NSPoint, NSDragOperation) -> Bool)?
     var onMoreRequested: (() -> Void)?
     var resolveMacGridFrame: ((NSRect, Bool) -> NSRect)?
     var onMacGridPreviewChanged: ((NSRect?) -> Void)?
@@ -30,6 +30,7 @@ final class RegionView: NSView {
     private var gesture: Gesture?
     private var dragStart: NSPoint?
     private var frameAtDragStart: NSRect?
+    private var acceptedFileOperation: NSDragOperation = []
     private var isDropTarget = false
     private var finderDragPreviewActive = false
     private var availableSlotIndices = Set<Int>()
@@ -229,7 +230,8 @@ final class RegionView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingPasteboard.canReadObject(
+        acceptedFileOperation = RegionFileDrag.operation(for: sender)
+        guard !acceptedFileOperation.isEmpty, sender.draggingPasteboard.canReadObject(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
         ) else { return [] }
@@ -237,17 +239,19 @@ final class RegionView: NSView {
         updateHoveredSlot(forWindowPoint: sender.draggingLocation)
         onFileDragPreviewChanged?(true, globalPoint(forWindowPoint: sender.draggingLocation))
         needsDisplay = true
-        return .move
+        return acceptedFileOperation
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        updateHoveredSlot(forWindowPoint: sender.draggingLocation)
-        onFileDragPreviewChanged?(true, globalPoint(forWindowPoint: sender.draggingLocation))
-        needsDisplay = true
-        return .move
+        guard !RegionFileDrag.operation(for: sender).isEmpty else {
+            if isDropTarget { draggingExited(sender) }
+            return []
+        }
+        return draggingEntered(sender)
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
+        acceptedFileOperation = []
         isDropTarget = false
         hoveredSlotIndex = nil
         onFileDragPreviewChanged?(false, nil)
@@ -256,17 +260,17 @@ final class RegionView: NSView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         defer {
+            acceptedFileOperation = []
             isDropTarget = false
             hoveredSlotIndex = nil
             onFileDragPreviewChanged?(false, nil)
             needsDisplay = true
         }
         let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL], !urls.isEmpty else {
+        guard !acceptedFileOperation.isEmpty, let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL], !urls.isEmpty else {
             return false
         }
-        onFilesDropped?(urls, sender.draggingLocation)
-        return true
+        return onFilesDropped?(urls, sender.draggingLocation, acceptedFileOperation) ?? false
     }
 
     func setAvailableSlots(_ indices: Set<Int>) {

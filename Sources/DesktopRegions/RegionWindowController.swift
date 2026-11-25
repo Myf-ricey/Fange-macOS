@@ -24,6 +24,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
 
     var onSortChanged: ((UUID, RegionFileSort) -> Void)?
     var onCollapseRequested: ((UUID) -> Void)?
+    var onFilesCopied: (([URL]) -> Void)?
     var onFilesDragStarted: (([URL]) -> Void)?
     var onFilesDragMoved: ((NSPoint) -> Void)?
     var onFilesRevealRequested: (([URL]) -> Void)?
@@ -31,7 +32,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     var onRenameFile: ((UUID, URL, String) -> Void)?
     var onFilesDragEnded: ((UUID, [URL], NSDragOperation) -> Void)?
     var onFrameChanged: ((UUID, NSRect) -> Void)?
-    var onFilesDropped: ((UUID, [URL], NSPoint) -> Void)?
+    var onFilesDropped: ((UUID, [URL], NSPoint, URL?, NSDragOperation) -> Bool)?
     var onMoreRequested: ((UUID) -> Void)?
     var onMacGridFrameRequested: ((UUID, NSRect, Bool) -> NSRect)?
     var onInteractionMouseMoved: ((NSPoint) -> Void)?
@@ -141,10 +142,11 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(resizeFiles),
             name: NSView.frameDidChangeNotification, object: fileScrollView.contentView)
         interactionView.addSubview(fileScrollView, positioned: .below, relativeTo: collapseButton)
-        filesView.onFilesDropped = { [weak self] urls, point in
-            guard let self else { return }
-            self.onFilesDropped?(self.region.id, urls, self.interactionWindow.convertPoint(toScreen: point))
+        filesView.onFilesDropped = { [weak self] urls, point, folder, operation in
+            guard let self else { return false }
+            return self.onFilesDropped?(self.region.id, urls, self.interactionWindow.convertPoint(toScreen: point), folder, operation) ?? false
         }
+        filesView.onCopy = { [weak self] in self?.onFilesCopied?($0) }
         filesView.onSortChanged = { [weak self] options in
             guard let self else { return }; self.onSortChanged?(self.region.id, options)
         }
@@ -160,7 +162,11 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             self.onFilesDragEnded?(self.region.id, urls, operation)
         }
-        filesView.onDropPreview = { [weak self] active in self?.regionView.setExternalFileDragPreview(active: active, at: nil) }
+        filesView.onDropPreview = { [weak self] active in
+            guard let self else { return }
+            if self.filesView.highlightsDropFolder { self.regionView.setFinderDragPreview(active: false) }
+            self.regionView.setExternalFileDragPreview(active: active, at: nil)
+        }
         layoutFileSurface()
 
         interactionView.onFrameChanged = { [weak self] frame in
@@ -170,13 +176,13 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
         interactionView.onLiveFrameChanged = { [weak self] frame in
             self?.showLiveFrame(frame)
         }
-        interactionView.onFilesDropped = { [weak self] urls, windowPoint in
-            guard let self else { return }
-            self.onFilesDropped?(
+        interactionView.onFilesDropped = { [weak self] urls, windowPoint, operation in
+            guard let self else { return false }
+            return self.onFilesDropped?(
                 self.region.id,
                 urls,
-                self.interactionWindow.convertPoint(toScreen: windowPoint)
-            )
+                self.interactionWindow.convertPoint(toScreen: windowPoint), nil, operation
+            ) ?? false
         }
         interactionView.onMoreRequested = { [weak self] in
             guard let self else { return }
@@ -341,7 +347,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func setFinderDragPreview(active: Bool, hoveredSlotIndex: Int? = nil) {
-        regionView.setFinderDragPreview(active: active, hoveredSlotIndex: hoveredSlotIndex)
+        regionView.setFinderDragPreview(active: active && !filesView.highlightsDropFolder, hoveredSlotIndex: hoveredSlotIndex)
     }
 
     func show() {

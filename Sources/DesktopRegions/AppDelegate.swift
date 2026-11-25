@@ -46,6 +46,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var folderSessions: [UUID: MappedFolderSession] = [:]
     private let fileOperationQueue = DispatchQueue(label: "com.ricey.desktop-regions.moves", qos: .userInitiated)
     private var fileMoveInProgress = false
+    private struct DesktopPlacement {
+        let region: Region
+        let urls: [URL]
+        let slots: [Int]
+        let screen: NSScreen
+    }
+
+    private enum FileMoveTarget {
+        case mappedRoot
+        case folder(URL)
+        case desktop(DesktopPlacement)
+    }
+
+    private var clipboardTimer: Timer?
+    private var pendingDesktopPlacement: DesktopPlacement?
     private var fileTransferProtectedPaths = Set<String>()
     private var terminateAfterFileOperation = false
     private var isPreparingToQuit = false
@@ -53,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     deinit {
         desktopChanges?.cancel()
+        clipboardTimer?.invalidate()
     }
 
     @MainActor private lazy var updateManager = AppUpdateManager { [weak self] in
@@ -79,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loginItemManager.refreshEnabledItemPath()
 
         loadWorkspace()
+        trackFileClipboard(.general)
         loadAndApplyGlobalGridPreference()
 
         watchDesktopChanges()
@@ -197,12 +214,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func undoLastAction() {
         guard !fileMoveInProgress, let step = undoHistory.nextStep else { return }
-        do { try desktopVisibility.restore(paths: Set(step.fileMoves.map(\.destination))) }
-        catch { showError(error); return }
         guard !step.fileMoves.isEmpty else { applyWorkspaceUndo(step); return }
+        let destinations = Set(step.fileMoves.map(\.destination))
+        do { try desktopVisibility.restore(paths: destinations) }
+        catch { _ = synchronizeFilePresentation(reportErrors: false); showError(error); return }
+        desktopVisibility.temporarilyVisiblePaths.formUnion(destinations)
+        fileTransferProtectedPaths.formUnion(destinations)
         fileMoveInProgress = true
         rebuildStatusMenu()
-        settingsWindow?.setStatus("正在把文件移回原位置…")
+        settingsWindow?.setStatus(step.fileMoves.first?.copiedIdentity == nil ? "正在把文件移回原位置…" : "正在将副本移到废纸篓…")
         let accessSessions = Array(folderSessions.values)
         fileOperationQueue.async { [weak self, accessSessions] in
             let result = Result { try FolderFileOperations.undo(step.fileMoves) }
@@ -210,6 +230,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 _ = accessSessions
                 guard let self else { return }
                 self.fileMoveInProgress = false
+                self.desktopVisibility.temporarilyVisiblePaths.subtract(destinations)
+                self.fileTransferProtectedPaths.subtract(destinations)
                 switch result {
                 case .success: self.applyWorkspaceUndo(step)
                 case .failure(let error):
@@ -493,6 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.desktopVisibility.temporarilyVisiblePaths.formUnion(paths)
                     do { try self.desktopVisibility.restore(paths: paths) } catch { self.showError(error) }
                 }
+                controller.onFilesCopied = { [weak self] in self?.copyFilesToClipboard($0) }
                 controller.onFilesDragStarted = { [weak self] urls in
                     self?.beginFileDrag(regionID: region.id, urls: urls)
                 }
@@ -514,8 +537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 controller.onFrameChanged = { [weak self] id, frame in
                     self?.regionFrameChanged(id: id, frame: frame)
                 }
-                controller.onFilesDropped = { [weak self] id, urls, globalPoint in
-                    self?.filesDropped(urls, into: id, near: globalPoint)
+                controller.onFilesDropped = { [weak self] id, urls, globalPoint, folder, operation in
+                    self?.filesDropped(urls, into: id, near: globalPoint, folder: folder, operation: operation) ?? false
                 }
                 controller.onMoreRequested = { [weak self] id in
                     self?.openAdvancedSettings(for: id)
@@ -538,6 +561,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateEditInteractionHitTesting(at: NSEvent.mouseLocation)
         refreshAvailableSlots()
         rebuildStatusMenu()
+    }
+
+    func copyFilesToClipboard(_ urls: [URL], board: NSPasteboard = .general) {
+        // Finder reads the originals when Paste is invoked, possibly much
+        // later. A copy of an app-hidden original would inherit UF_HIDDEN.
+        let paths = Set(urls.map { $0.standardizedFileURL.path })
+        do { try desktopVisibility.restore(paths: paths) }
+        catch { _ = synchronizeFilePresentation(reportErrors: false); showError(error); return }
+        _ = RegionFileClipboard.write(urls, to: board)
+        trackFileClipboard(board)
+        _ = synchronizeFilePresentation()
+    }
+
+    private func trackFileClipboard(_ board: NSPasteboard) {
+        clipboardTimer?.invalidate()
+        clipboardTimer = nil
+        desktopVisibility.clipboardPaths = []
+        guard board.availableType(from: [RegionFileClipboard.marker]) != nil,
+              let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
+        else { return }
+        desktopVisibility.clipboardPaths = Set(urls.filter(isDesktopURL).map { $0.standardizedFileURL.path })
+        guard !desktopVisibility.clipboardPaths.isEmpty else { return }
+        let generation = board.changeCount
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self, board.changeCount != generation else { return }
+            self.trackFileClipboard(board)
+            _ = self.synchronizeFilePresentation(reportErrors: false)
+        }
+        timer.tolerance = 0.15
+        clipboardTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func beginFileDrag(regionID: UUID, urls: [URL]) {
@@ -573,6 +627,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func updateFileDrag(at point: NSPoint) {
+        updateEditInteractionHitTesting(at: point)
         desktopDropController.update(at: point)
     }
 
@@ -720,57 +775,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func filesDropped(_ urls: [URL], into id: UUID, near globalPoint: NSPoint) {
-        guard let region = store.region(id: id),
-              let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+    func filesDropped(_ urls: [URL], into id: UUID, near globalPoint: NSPoint, folder: URL?, operation: NSDragOperation = .move) -> Bool {
+        guard operation == .move || operation == .copy else { return false }
+        let copying = operation == .copy
+        guard !urls.isEmpty, urls.allSatisfy(\.isFileURL), canChangeWorkspace(), let region = store.region(id: id),
+              let screen = NSScreen.main ?? NSScreen.screens.first else { return false }
         guard RegionLayout.dropTargetRegion(
             at: globalPoint,
             in: store.regions
-        )?.id == id else { return }
+        )?.id == id else { return false }
+        if let folder {
+            guard !region.isCollapsed, region.ownsFileSurface else { return false }
+            let path = folder.standardizedFileURL.path
+            if region.isMapped {
+                guard folder.deletingLastPathComponent().standardizedFileURL.path ==
+                        folderSessions[id]?.folderURL.standardizedFileURL.path else { return false }
+            } else {
+                guard isDesktopURL(folder), region.itemBindings.contains(where: { $0.isExplicit && $0.path == path })
+                    else { return false }
+            }
+            return transferFiles(urls, regionID: id, target: .folder(folder), copying: copying)
+        }
         if region.isMapped {
-            moveFilesIntoMappedFolder(urls, regionID: id)
-            return
+            return transferFiles(urls, regionID: id, copying: copying)
         }
-        let uniqueURLs = uniqueDesktopURLs(urls)
-        guard !uniqueURLs.isEmpty, uniqueURLs.allSatisfy(isDesktopURL) else {
-            showError(desktopOnlyError())
-            return
-        }
-        let movingPaths = Set(uniqueURLs.map { $0.standardizedFileURL.path })
+        let sources = FolderFileOperations.topLevelSources(urls)
+        let movingPaths: Set<String> = copying ? [] : Set(sources.filter(isDesktopURL).map(\.path))
         var occupied = occupiedSlotIndices(in: region, excludingPaths: movingPaths)
         var slotIndices: [Int] = []
-        for _ in uniqueURLs {
+        for _ in sources {
             guard let slot = RegionLayout.nearestAvailableSlot(
                 to: globalPoint,
                 in: region,
                 excluding: occupied
             ) else {
                 showError(noFreeSlotError(for: region))
-                return
+                return false
             }
             occupied.insert(slot)
             slotIndices.append(slot)
         }
-        let undoSnapshot = makeWorkspaceSnapshot()
-        if let error = moveDesktopItemsProgrammatically(
-            uniqueURLs,
-            toSlotIndices: slotIndices,
-            in: region,
-            screen: screen
-        ) {
-            showError(error)
-            return
+        let desktop = desktopVisibility.desktopURL
+        if copying {
+            do {
+                let plan = try FolderFileOperations.planMove(sources, into: desktop, copying: true)
+                let placement = DesktopPlacement(region: region, urls: plan.map { URL(fileURLWithPath: $0.destination) },
+                                                 slots: slotIndices, screen: screen)
+                return transferFiles(sources, regionID: id, target: .desktop(placement), copying: true, plan: plan)
+            } catch { showError(error); return false }
         }
-        commitBindings(regionID: id, urls: uniqueURLs, slotIndices: slotIndices)
+        let finalURLs = sources.map { desktop.appendingPathComponent($0.lastPathComponent) }
+        let placement = DesktopPlacement(region: region, urls: finalURLs, slots: slotIndices, screen: screen)
+        let incoming = sources.filter { !isDesktopURL($0) }
+        if !incoming.isEmpty {
+            return transferFiles(incoming, regionID: id, target: .desktop(placement))
+        }
+        return finishDesktopDrop(placement, snapshot: makeWorkspaceSnapshot(), moves: [])
+    }
+
+    @discardableResult
+    private func finishDesktopDrop(_ placement: DesktopPlacement, snapshot: WorkspaceSnapshot, moves: [FileMove]) -> Bool {
+        let region = placement.region
+        let positioningError = moveDesktopItemsProgrammatically(
+            placement.urls, toSlotIndices: placement.slots, in: region, screen: placement.screen
+        )
+        if let positioningError, moves.isEmpty {
+            showError(positioningError)
+            return false
+        }
+        commitBindings(regionID: region.id, urls: placement.urls, slotIndices: placement.slots)
+        let movingPaths = Set(placement.urls.map(\.path))
         dragAvailabilityState.confirm(paths: movingPaths)
         finderDesktopMonitor.stopTrackingMovements(for: movingPaths)
         if dragAvailabilityState.pendingConfirmationPaths.isEmpty {
             pendingDragCleanupWorkItem?.cancel()
             pendingDragCleanupWorkItem = nil
         }
-        recordUndoStep(title: "把图标放入分区", snapshot: undoSnapshot)
-        regionWindows[id]?.showDropFeedback()
-        settingsWindow?.setStatus("已将 \(uniqueURLs.count) 个桌面图标放入“\(region.name)”")
+        let verb = moves.first?.copiedIdentity == nil ? "移入" : "拷贝到"
+        let title = moves.isEmpty ? "把图标放入分区" : "把文件\(verb)“\(region.name)”"
+        recordUndoStep(title: title, snapshot: snapshot, fileMoves: moves)
+        regionWindows[region.id]?.showDropFeedback()
+        if let positioningError {
+            // The originals are already on the desktop. Preserve bindings and
+            // undo information even if Finder hasn't indexed their icons yet.
+            scheduleBoundItemReposition(regionID: region.id, reason: .restoreBindings)
+            settingsWindow?.setStatus("文件已移入分区，正在重试访达图标定位：\(positioningError.localizedDescription)")
+        } else {
+            settingsWindow?.setStatus("已将 \(placement.urls.count) 个项目放入“\(region.name)”")
+        }
+        return true
     }
 
     private func handleMovedDesktopItems(
@@ -791,8 +884,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var pathsToUnbind = Set<String>()
 
         for item in items {
-            guard FolderFileOperations.entryExists(at: item.url) else { continue }
             let path = item.url.standardizedFileURL.path
+            guard !fileTransferProtectedPaths.contains(path), FolderFileOperations.entryExists(at: item.url) else { continue }
             let globalPoint = globalPoint(forFinderPosition: item.position, screen: screen)
             guard let region = RegionLayout.dropTargetRegion(
                 at: globalPoint,
@@ -802,7 +895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
             if region.isMapped {
-                moveFilesIntoMappedFolder([item.url], regionID: region.id)
+                transferFiles([item.url], regionID: region.id)
                 continue
             }
             if region.isCollapsed { continue }
@@ -1082,7 +1175,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func occupiedSlotIndices(in region: Region, excludingPaths: Set<String>) -> Set<Int> {
-        RegionBindingPolicy.occupiedSlotIndices(in: region, excludingPaths: excludingPaths)
+        let occupied = RegionBindingPolicy.occupiedSlotIndices(in: region, excludingPaths: excludingPaths)
+        guard let pendingDesktopPlacement, pendingDesktopPlacement.region.id == region.id else { return occupied }
+        return occupied.union(pendingDesktopPlacement.slots)
     }
 
     private func commitBindings(regionID: UUID, urls: [URL], slotIndices: [Int]) {
@@ -1343,14 +1438,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func desktopOnlyError() -> Error {
-        NSError(
-            domain: "DesktopRegions",
-            code: 1001,
-            userInfo: [NSLocalizedDescriptionKey: "请从桌面上的文件图标拖入区域。其他位置的文件不会被移动到桌面。"]
-        )
-    }
-
     func requestFolderMapping(for id: UUID, from view: NSView) {
         guard let region = store.region(id: id) else { return }
         if !region.isMapped { chooseFolder(for: id); return }
@@ -1506,46 +1593,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func moveFilesIntoMappedFolder(_ urls: [URL], regionID: UUID) {
+    @discardableResult
+    private func transferFiles(_ urls: [URL], regionID: UUID, target: FileMoveTarget = .mappedRoot,
+                               copying: Bool = false, plan: [FileMove]? = nil) -> Bool {
+        let verb = copying ? "拷贝" : "移动"
         guard !fileMoveInProgress else {
             settingsWindow?.setStatus("正在移动文件，请稍候再拖入")
-            return
+            return false
         }
-        guard let session = folderSessions[regionID] else { return }
-        let snapshot = makeWorkspaceSnapshot()
+        let destination: URL
+        let snapshot: WorkspaceSnapshot
         let sourcePaths = Set(urls.map { $0.standardizedFileURL.path })
+        var protectedPaths = sourcePaths
+        switch target {
+        case .desktop(let placement):
+            destination = desktopVisibility.desktopURL
+            // Only existing desktop items in a mixed selection had a Finder
+            // position before this drop. New arrivals return to their folders.
+            let finalPaths = Set(placement.urls.map(\.path))
+            let incomingPaths = Set(urls.map { destination.appendingPathComponent($0.lastPathComponent).path })
+            let existingPaths: Set<String> = copying ? [] : finalPaths.subtracting(incomingPaths)
+            let previousItems = existingPaths.isEmpty ? [] :
+                finderDesktopMonitor.itemsForWorkspaceSnapshot().filter { existingPaths.contains($0.url.path) }
+            snapshot = makeWorkspaceSnapshot(finderItems: previousItems)
+            protectedPaths.formUnion(finalPaths)
+        case .folder(let folder):
+            destination = folder
+            snapshot = copying ? makeWorkspaceSnapshot(finderItems: []) : makeWorkspaceSnapshot()
+        case .mappedRoot:
+            guard let root = folderSessions[regionID]?.folderURL else { return false }
+            destination = root
+            snapshot = copying ? makeWorkspaceSnapshot(finderItems: []) : makeWorkspaceSnapshot()
+        }
+        let accessSessions = Array(folderSessions.values)
         desktopVisibility.temporarilyVisiblePaths.formUnion(sourcePaths)
         do { try desktopVisibility.restore(paths: sourcePaths) }
-        catch { desktopVisibility.temporarilyVisiblePaths.subtract(sourcePaths); showError(error); return }
-        fileTransferProtectedPaths.formUnion(sourcePaths)
+        catch {
+            desktopVisibility.temporarilyVisiblePaths.subtract(sourcePaths)
+            _ = synchronizeFilePresentation(reportErrors: false)
+            showError(error)
+            return false
+        }
+        if case .desktop(let placement) = target { pendingDesktopPlacement = placement }
+        fileTransferProtectedPaths.formUnion(protectedPaths)
         fileMoveInProgress = true
         rebuildStatusMenu()
-        settingsWindow?.setStatus("正在移动 \(urls.count) 个文件…")
-        fileOperationQueue.async { [weak self, session] in
+        settingsWindow?.setStatus("正在\(verb) \(urls.count) 个文件…")
+        fileOperationQueue.async { [weak self, accessSessions, protectedPaths] in
             let result: Result<[FileMove], Error> = Result {
-                let moves = try FolderFileOperations.planMove(urls, into: session.folderURL)
+                if case .folder = target, !FolderFileOperations.isDropFolder(URL(fileURLWithPath: destination.path)) {
+                    throw FolderFileOperations.error("目标文件夹已更改，请重新选择。")
+                }
+                let moves = try plan ?? FolderFileOperations.planMove(urls, into: destination, copying: copying)
+                if copying { return try FolderFileOperations.copy(moves, into: destination) }
                 try FolderFileOperations.execute(moves)
                 return moves
             }
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self, accessSessions, protectedPaths] in
+                _ = accessSessions
                 guard let self else { return }
                 self.fileMoveInProgress = false
-                self.fileTransferProtectedPaths.subtract(sourcePaths)
+                self.pendingDesktopPlacement = nil
+                self.fileTransferProtectedPaths.subtract(protectedPaths)
                 self.desktopVisibility.temporarilyVisiblePaths.subtract(sourcePaths)
                 switch result {
                 case .success(let moves):
-                    self.removeBindings(forPaths: Set(moves.map(\.source)))
-                    if !moves.isEmpty { self.recordUndoStep(title: "移动文件到映射文件夹", snapshot: snapshot, fileMoves: moves) }
-                    self.regionWindows[regionID]?.showDropFeedback()
-                    self.settingsWindow?.setStatus("已移动 \(moves.count) 个文件到“\(session.folderURL.lastPathComponent)”")
-                case .failure(let error): self.showError(error)
+                    if case .desktop(let placement) = target {
+                        self.finishDesktopDrop(placement, snapshot: snapshot, moves: moves)
+                    } else {
+                        if !copying { self.removeBindings(forPaths: Set(moves.map(\.source))) }
+                        if !moves.isEmpty { self.recordUndoStep(title: "\(verb)文件到“\(destination.lastPathComponent)”", snapshot: snapshot, fileMoves: moves) }
+                        self.regionWindows[regionID]?.showDropFeedback()
+                        self.settingsWindow?.setStatus("已\(verb) \(moves.count) 个文件到“\(destination.lastPathComponent)”")
+                        _ = self.synchronizeFilePresentation()
+                    }
+                case .failure(let error):
+                    _ = self.synchronizeFilePresentation(reportErrors: false)
+                    self.showError(error)
                 }
-                _ = self.synchronizeFilePresentation()
-                self.folderSessions.values.forEach { $0.reload() }
+                self.folderSessions.values.forEach { $0.reload(discardInFlight: true) }
                 self.rebuildStatusMenu()
                 self.finishPendingTermination()
             }
         }
+        return true
     }
 
     private func canChangeWorkspace() -> Bool {

@@ -10,7 +10,7 @@
 
 饭格让桌面图标整齐归位，也能把真实文件夹映射到桌面分区。支持大图标、列表、展开收起和独立排序，照常双击打开文件、拖动整理。
 
-> 当前版本为 `0.2.10 Beta`。全部功能免费，无广告、无账号、无订阅。源代码允许个人和企业使用、修改与商用。
+> 当前版本为 `0.3.0 Beta`。全部功能免费，无广告、无账号、无订阅。源代码允许个人和企业使用、修改与商用。
 
 <p align="center">
   <img src="assets/poster.png" width="640" alt="饭格核心功能海报">
@@ -18,10 +18,10 @@
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.2.10) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.2.10/Fange-v0.2.10-macOS-universal.zip)。
+前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.3.0) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.3.0/Fange-v0.3.0-macOS-universal.zip)。
 
 ```text
-Fange-v0.2.10-macOS-universal.zip
+Fange-v0.3.0-macOS-universal.zip
 ```
 
 支持 Apple Silicon 与 Intel Mac，系统要求 macOS 13 Ventura 或更高版本。
@@ -44,6 +44,10 @@ Fange-v0.2.10-macOS-universal.zip
 
 ### 操作便捷
 
+- 选中图标后按空格使用系统快速查看。多选时用左右键切换，空格或 Esc 关闭。Return 重新命名，⌘O 打开。
+- 按住 Option 拖到分区空位或文件夹可建立副本；同一目录内自动取副本名。撤销拷贝会把副本移到废纸篓。
+- ⌘C 和右键“拷贝”都支持多选。文件在剪贴板上期间，饭格会暂时恢复对应桌面原图标的可见性，让访达粘贴出可见的文件。
+- 从访达文件夹把项目拖到普通分区的空位，原件会移到桌面并排入该分区。拖到分区内的文件夹上会移入该文件夹。菜单栏的“撤销”可将原件移回原位置。
 - 把桌面图标拖入分区，松手后自动吸附到最近空位。
 - 图标与分区保持绑定，移动或缩放分区后仍会整齐归位。
 - 分区大小、位置、数量、行列和图标间距都可自由调整。

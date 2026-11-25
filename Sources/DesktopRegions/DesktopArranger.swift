@@ -44,7 +44,7 @@ enum DesktopArranger {
             return NSError(
                 domain: "DesktopRegions",
                 code: 1001,
-                userInfo: [NSLocalizedDescriptionKey: "请从桌面上的文件图标拖入区域。其他位置的文件不会被移动到桌面。"]
+                userInfo: [NSLocalizedDescriptionKey: "无法定位图标，请检查文件是否位于桌面。"]
             )
         }
 
@@ -96,7 +96,7 @@ enum DesktopArranger {
             return NSError(
                 domain: "DesktopRegions",
                 code: 1001,
-                userInfo: [NSLocalizedDescriptionKey: "请从桌面上的文件图标拖入区域。其他位置的文件不会被移动到桌面。"]
+                userInfo: [NSLocalizedDescriptionKey: "无法定位图标，请检查文件是否位于桌面。"]
             )
         }
 

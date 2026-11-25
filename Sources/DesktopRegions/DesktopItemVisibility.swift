@@ -26,6 +26,7 @@ final class DesktopItemVisibility {
     let desktopURL: URL
     private var entries: [Entry]
     var temporarilyVisiblePaths = Set<String>()
+    var clipboardPaths = Set<String>()
 
     init(journalURL: URL? = nil, desktopURL: URL? = nil) {
         self.desktopURL = desktopURL ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
@@ -39,7 +40,7 @@ final class DesktopItemVisibility {
     func synchronize(regions: [Region]) throws {
         let desired = Set(regions.filter(\.hidesDesktopItems).flatMap {
             $0.itemBindings.filter(\.isExplicit).map(\.path)
-        }).subtracting(temporarilyVisiblePaths)
+        }).subtracting(temporarilyVisiblePaths).subtracting(clipboardPaths)
         try restore(entries.filter { entry in
             var info = stat()
             return !desired.contains(entry.path) || (lstat(entry.path, &info) == 0 && !entry.matches(info))

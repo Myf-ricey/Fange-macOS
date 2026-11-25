@@ -7,9 +7,34 @@ import Darwin
 struct FileMove: Codable, Equatable {
     let source: String
     let destination: String
+    var copiedIdentity: CopiedItemIdentity?
+}
+
+/// Undo can trash the copy we created, even if its original was renamed.
+/// A different item subsequently placed at the same path must be left alone.
+struct CopiedItemIdentity: Codable, Equatable {
+    let device: Int32
+    let inode: UInt64
+    let birthSeconds: Int
+    let birthNanos: Int
+
+    init(at url: URL) throws {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { throw FolderFileOperations.error("找不到副本：\(url.lastPathComponent)") }
+        device = info.st_dev
+        inode = info.st_ino
+        birthSeconds = info.st_birthtimespec.tv_sec
+        birthNanos = info.st_birthtimespec.tv_nsec
+    }
 }
 
 enum FolderFileOperations {
+    static func isDropFolder(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .isAliasFileKey])
+        return values?.isDirectory == true && values?.isPackage == false &&
+            values?.isSymbolicLink == false && values?.isAliasFile != true
+    }
+
     static func entryExists(at url: URL) -> Bool {
         var info = stat()
         return lstat(url.path, &info) == 0
@@ -26,26 +51,29 @@ enum FolderFileOperations {
                 userInfo: [NSLocalizedDescriptionKey: message])
     }
 
+    static func topLevelSources(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        let sources = urls.map(\.standardizedFileURL).filter { seen.insert($0.path).inserted }
+        return sources.filter { candidate in
+            !sources.contains { parent in
+                parent != candidate && candidate.path.hasPrefix(parent.path + "/") &&
+                (try? parent.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true
+            }
+        }
+    }
+
     /// Validate the complete batch before changing any file. Never replace an
     /// existing entry, including a dangling symbolic link.
-    static func planMove(_ urls: [URL], into folder: URL) throws -> [FileMove] {
+    static func planMove(_ urls: [URL], into folder: URL, copying: Bool = false) throws -> [FileMove] {
         let folder = folder.standardizedFileURL
         let values = try folder.resourceValues(forKeys: [.isDirectoryKey, .isWritableKey])
         guard values.isDirectory == true, values.isWritable != false else {
             throw error("目标文件夹不可写，请重新选择文件夹或检查访问权限。")
         }
         let canonicalFolder = folder.resolvingSymlinksInPath().path
-        var seen = Set<String>()
-        let sources = urls.map(\.standardizedFileURL).filter { seen.insert($0.path).inserted }
-        let roots = sources.filter { candidate in
-            !sources.contains { parent in
-                parent != candidate && candidate.path.hasPrefix(parent.path + "/") &&
-                (try? parent.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true
-            }
-        }
         var moves: [FileMove] = []
         var destinations = Set<String>()
-        for source in roots {
+        for source in topLevelSources(urls) {
             var info = stat()
             guard lstat(source.path, &info) == 0 else { throw error("找不到文件：\(source.lastPathComponent)") }
             let isLink = (info.st_mode & S_IFMT) == S_IFLNK
@@ -53,8 +81,18 @@ enum FolderFileOperations {
             if canonicalFolder == canonicalSource || canonicalFolder.hasPrefix(canonicalSource + "/") {
                 throw error("不能把文件夹放入自身或它的子文件夹。")
             }
-            let destination = folder.appendingPathComponent(source.lastPathComponent)
-            if source.deletingLastPathComponent().resolvingSymlinksInPath().path == canonicalFolder { continue }
+            var destination = folder.appendingPathComponent(source.lastPathComponent)
+            if source.deletingLastPathComponent().resolvingSymlinksInPath().path == canonicalFolder {
+                guard copying else { continue }
+                let stem = source.deletingPathExtension().lastPathComponent
+                let ext = source.pathExtension.isEmpty ? "" : "." + source.pathExtension
+                var number = 1
+                repeat {
+                    let suffix = number == 1 ? " 副本" : " 副本 \(number)"
+                    destination = folder.appendingPathComponent(stem + suffix + ext)
+                    number += 1
+                } while entryExists(at: destination) || destinations.contains(destination.path)
+            }
             var existing = stat()
             guard lstat(destination.path, &existing) != 0,
                   destinations.insert(destination.path).inserted else {
@@ -86,6 +124,46 @@ enum FolderFileOperations {
         }
     }
 
+    static func copy(_ plan: [FileMove], into folder: URL) throws -> [FileMove] {
+        let manager = FileManager.default
+        let staging = folder.appendingPathComponent(".fange-copy-" + UUID().uuidString, isDirectory: true)
+        try manager.createDirectory(at: staging, withIntermediateDirectories: false,
+                                    attributes: [.posixPermissions: 0o700])
+        defer { try? manager.removeItem(at: staging) }
+        var publish: [FileMove] = []
+        var copies: [FileMove] = []
+        for var item in plan {
+            let staged = staging.appendingPathComponent(UUID().uuidString)
+            try manager.copyItem(at: URL(fileURLWithPath: item.source), to: staged)
+            item.copiedIdentity = try CopiedItemIdentity(at: staged)
+            copies.append(item)
+            publish.append(FileMove(source: staged.path, destination: item.destination))
+        }
+        // All copies are complete before exposing the first final name.
+        try execute(publish)
+        return copies
+    }
+
+    private static func undoCopies(_ copies: [FileMove]) throws {
+        for copy in copies {
+            let url = URL(fileURLWithPath: copy.destination)
+            guard try CopiedItemIdentity(at: url) == copy.copiedIdentity else {
+                throw error("无法撤销拷贝：原副本已被替换。\n\(url.path)")
+            }
+        }
+        var restore: [FileMove] = []
+        do {
+            for copy in copies {
+                var trashed: NSURL?
+                try FileManager.default.trashItem(at: URL(fileURLWithPath: copy.destination), resultingItemURL: &trashed)
+                if let path = trashed?.path { restore.append(FileMove(source: path, destination: copy.destination)) }
+            }
+        } catch {
+            try execute(Array(restore.reversed()))
+            throw error
+        }
+    }
+
     static func rename(_ source: URL, to name: String) throws -> FileMove {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !name.hasPrefix("."), !name.contains("/"), !name.contains(":"), !name.contains("\0") else {
@@ -98,6 +176,7 @@ enum FolderFileOperations {
     }
 
     static func undo(_ moves: [FileMove]) throws {
+        if moves.first?.copiedIdentity != nil { try undoCopies(moves); return }
         // Preflight reverse operations too: undo must never overwrite new work.
         for move in moves {
             var info = stat()
