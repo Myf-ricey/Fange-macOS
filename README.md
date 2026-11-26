@@ -10,7 +10,7 @@
 
 饭格让桌面图标整齐归位，也能把真实文件夹映射到桌面分区。支持大图标、列表、展开收起和独立排序，照常双击打开文件、拖动整理。
 
-> 当前版本为 `0.3.1 Beta`。全部功能免费，无广告、无账号、无订阅。源代码允许个人和企业使用、修改与商用。
+> 当前版本为 `0.3.2 Beta`。全部功能免费，无广告、无账号、无订阅。源代码允许个人和企业使用、修改与商用。
 
 <p align="center">
   <img src="assets/poster.png" width="640" alt="饭格核心功能海报">
@@ -18,10 +18,10 @@
 
 ## 下载
 
-前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.3.1) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.3.1/Fange-v0.3.1-macOS-universal.zip)。
+前往 [GitHub Releases](https://github.com/Myf-ricey/Fange-macOS/releases/tag/v0.3.2) 下载，或使用[直接下载链接](https://github.com/Myf-ricey/Fange-macOS/releases/download/v0.3.2/Fange-v0.3.2-macOS-universal.zip)。
 
 ```text
-Fange-v0.3.1-macOS-universal.zip
+Fange-v0.3.2-macOS-universal.zip
 ```
 
 支持 Apple Silicon 与 Intel Mac，系统要求 macOS 13 Ventura 或更高版本。
@@ -54,6 +54,7 @@ Fange-v0.3.1-macOS-universal.zip
 - 把真实文件夹映射到分区，内容实时同步，拖入文件会实际移入该文件夹。
 - 分区支持展开收起、大图标与列表展示。缩小普通分区或拖入更多图标时，可以把放不下的图标留在下方，滚动查看。
 - 选中后单击文件名，或右键选择「重新命名」。按回车或点空白保存，按 Esc 取消。
+- 右键选择「移到废纸篓」可移走选中的文件或文件夹，支持多选，也可从饭格菜单栏撤销。
 - 映射分区与列表分区可按名称、时间、大小或类型独立排序。
 - 常驻菜单栏，可选择登录时自动启动；每次启动检查 GitHub 更新，也可手动检查并一键更新。
 

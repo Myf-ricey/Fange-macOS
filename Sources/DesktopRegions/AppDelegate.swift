@@ -538,6 +538,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 controller.onRenameFile = { [weak self] id, url, name in
                     self?.renameFile(url, to: name, in: id)
                 }
+                controller.onFilesTrashed = { [weak self] id, urls in
+                    self?.trashFiles(urls, in: id)
+                }
                 controller.onFilesRevealEnded = { [weak self] urls in
                     guard let self else { return }
                     self.desktopVisibility.temporarilyVisiblePaths.subtract(Set(urls.map(\.path)).subtracting(self.fileTransferProtectedPaths))
@@ -1582,6 +1585,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             folderSessions[region.id] = session
             regionWindows[region.id]?.setFiles([], message: "正在读取文件夹…")
             session.start()
+        }
+        return true
+    }
+
+    @discardableResult
+    func trashFiles(_ urls: [URL], in regionID: UUID) -> Bool {
+        guard !urls.isEmpty, urls.allSatisfy(\.isFileURL), canChangeWorkspace(),
+              let region = store.region(id: regionID) else { return false }
+        let sources = FolderFileOperations.topLevelSources(urls)
+        let paths = Set(sources.map(\.path))
+        let session = folderSessions[regionID]
+        if region.isMapped {
+            guard let folder = session?.folderURL.standardizedFileURL,
+                  sources.allSatisfy({ $0.deletingLastPathComponent().path == folder.path }) else { return false }
+        } else {
+            let boundPaths = Set(region.itemBindings.lazy.filter(\.isExplicit).map(\.path))
+            guard paths.isSubset(of: boundPaths), sources.allSatisfy(isDesktopURL) else { return false }
+        }
+
+        let snapshot = makeWorkspaceSnapshot(finderItems: [])
+        desktopVisibility.temporarilyVisiblePaths.formUnion(paths)
+        do { try desktopVisibility.restore(paths: paths) }
+        catch {
+            desktopVisibility.temporarilyVisiblePaths.subtract(paths)
+            _ = synchronizeFilePresentation(reportErrors: false)
+            showError(error)
+            return false
+        }
+
+        fileMoveInProgress = true
+        fileTransferProtectedPaths.formUnion(paths)
+        rebuildStatusMenu()
+        fileOperationQueue.async { [weak self, session] in
+            let result = withExtendedLifetime(session) { FolderFileOperations.trash(sources) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.fileMoveInProgress = false
+                self.fileTransferProtectedPaths.subtract(paths)
+                self.desktopVisibility.temporarilyVisiblePaths.subtract(paths)
+                self.removeBindings(forPaths: result.movedPaths)
+                if !result.moves.isEmpty, result.moves.count == result.movedPaths.count {
+                    self.recordUndoStep(title: "移到废纸篓", snapshot: snapshot, fileMoves: result.moves)
+                }
+                if !result.movedPaths.isEmpty {
+                    self.settingsWindow?.setStatus("已将 \(result.movedPaths.count) 个项目移到废纸篓")
+                }
+                self.folderSessions.values.forEach { $0.reload(discardInFlight: true) }
+                self.rebuildStatusMenu()
+                self.finishPendingTermination()
+                if !result.failures.isEmpty, !self.isPreparingToQuit {
+                    let details = result.failures.joined(separator: "\n")
+                    self.showError(FolderFileOperations.error("以下项目未能移到废纸篓。\n\(details)"))
+                }
+            }
         }
         return true
     }

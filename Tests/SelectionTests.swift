@@ -166,6 +166,8 @@ struct SelectionTests {
         first.keyDown(with: key("c", code: 8, flags: .command))
         precondition(clipboardPaths() == group)
         board.clearContents()
+        var trashedPaths: [String] = []
+        first.onTrash = { trashedPaths = $0.map(\.path) }
         let groupMenu = first.menu(for: mouse(.rightMouseDown, in: first, at: NSPoint(x: 53, y: 40)))!
         let groupCopy = groupMenu.item(withTitle: "拷贝 2 个项目")!
         precondition(app.sendAction(groupCopy.action!, to: groupCopy.target, from: groupCopy) && clipboardPaths() == group)
@@ -173,7 +175,14 @@ struct SelectionTests {
         let singleCopy = singleMenu.item(withTitle: "拷贝")!
         precondition(app.sendAction(singleCopy.action!, to: singleCopy.target, from: singleCopy) &&
                      clipboardPaths() == [first.urls[2].path])
-        print("Return rename, spaces in names, keyboard and multi-item context clipboard: PASS")
+        let groupTrash = groupMenu.item(withTitle: "移到废纸篓")!
+        let singleTrash = singleMenu.item(withTitle: "移到废纸篓")!
+        precondition(app.sendAction(groupTrash.action!, to: groupTrash.target, from: groupTrash) && trashedPaths == group)
+        precondition(app.sendAction(singleTrash.action!, to: singleTrash.target, from: singleTrash) &&
+                     trashedPaths == [first.urls[2].path])
+        let blankMenu = first.menu(for: mouse(.rightMouseDown, in: first, at: NSPoint(x: 3, y: 3)))
+        precondition(blankMenu?.item(withTitle: "移到废纸篓") == nil)
+        print("Return rename, spaces in names, and single/multi-item context copy and trash: PASS")
 
         let destination = URL(fileURLWithPath: "/tmp/新名称.app")
         click(first)

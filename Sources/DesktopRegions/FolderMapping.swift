@@ -7,12 +7,12 @@ import Darwin
 struct FileMove: Codable, Equatable {
     let source: String
     let destination: String
-    var copiedIdentity: CopiedItemIdentity?
+    var copiedIdentity: FileItemIdentity?
+    var trashedIdentity: FileItemIdentity?
 }
 
-/// Undo can trash the copy we created, even if its original was renamed.
-/// A different item subsequently placed at the same path must be left alone.
-struct CopiedItemIdentity: Codable, Equatable {
+/// Detects replacement of an item at the same path before undoing a move.
+struct FileItemIdentity: Codable, Equatable {
     let device: Int32
     let inode: UInt64
     let birthSeconds: Int
@@ -20,7 +20,7 @@ struct CopiedItemIdentity: Codable, Equatable {
 
     init(at url: URL) throws {
         var info = stat()
-        guard lstat(url.path, &info) == 0 else { throw FolderFileOperations.error("找不到副本：\(url.lastPathComponent)") }
+        guard lstat(url.path, &info) == 0 else { throw FolderFileOperations.error("找不到项目：\(url.lastPathComponent)") }
         device = info.st_dev
         inode = info.st_ino
         birthSeconds = info.st_birthtimespec.tv_sec
@@ -135,7 +135,7 @@ enum FolderFileOperations {
         for var item in plan {
             let staged = staging.appendingPathComponent(UUID().uuidString)
             try manager.copyItem(at: URL(fileURLWithPath: item.source), to: staged)
-            item.copiedIdentity = try CopiedItemIdentity(at: staged)
+            item.copiedIdentity = try FileItemIdentity(at: staged)
             copies.append(item)
             publish.append(FileMove(source: staged.path, destination: item.destination))
         }
@@ -147,7 +147,7 @@ enum FolderFileOperations {
     private static func undoCopies(_ copies: [FileMove]) throws {
         for copy in copies {
             let url = URL(fileURLWithPath: copy.destination)
-            guard try CopiedItemIdentity(at: url) == copy.copiedIdentity else {
+            guard try FileItemIdentity(at: url) == copy.copiedIdentity else {
                 throw error("无法撤销拷贝：原副本已被替换。\n\(url.path)")
             }
         }
@@ -162,6 +162,25 @@ enum FolderFileOperations {
             try execute(Array(restore.reversed()))
             throw error
         }
+    }
+
+    static func trash(_ urls: [URL]) -> (movedPaths: Set<String>, moves: [FileMove], failures: [String]) {
+        var movedPaths = Set<String>()
+        var moves: [FileMove] = []
+        var failures: [String] = []
+        for source in urls {
+            do {
+                var destination: NSURL?
+                try FileManager.default.trashItem(at: source, resultingItemURL: &destination)
+                movedPaths.insert(source.path)
+                if let trashed = destination as URL?, let identity = try? FileItemIdentity(at: trashed) {
+                    moves.append(FileMove(source: source.path, destination: trashed.path, trashedIdentity: identity))
+                }
+            } catch {
+                failures.append("\(source.lastPathComponent)：\(error.localizedDescription)")
+            }
+        }
+        return (movedPaths, moves, failures)
     }
 
     static func rename(_ source: URL, to name: String) throws -> FileMove {
@@ -181,6 +200,10 @@ enum FolderFileOperations {
         for move in moves {
             var info = stat()
             guard lstat(move.destination, &info) == 0 else { throw error("无法撤销：文件已被移动或删除。\n\(move.destination)") }
+            if let identity = move.trashedIdentity,
+               try FileItemIdentity(at: URL(fileURLWithPath: move.destination)) != identity {
+                throw error("无法撤销：废纸篓中的原项目已被替换。\n\(move.destination)")
+            }
             guard lstat(move.source, &info) != 0 || isAlternateSpelling(move) else {
                 throw error("无法撤销：原位置已有同名文件。\n\(move.source)")
             }

@@ -82,6 +82,7 @@ struct DesktopDropTests {
 
         try verifyDesktopImport(in: root)
         try verifyFolderDrops(in: root)
+        try verifyTrash(in: root)
         try verifyQuitRecovery(in: root)
         if ProcessInfo.processInfo.environment["FANGE_LIVE_FINDER_MISSING_TEST"] == "1" {
             let missing = realDesktop.appendingPathComponent("FangeMissing-\(UUID().uuidString)")
@@ -257,6 +258,61 @@ struct DesktopDropTests {
         }
         let contents = try Data(contentsOf: movedFile)
         check(contents == Data("mapped content".utf8), "folder move preserves the original contents")
+    }
+
+    private static func verifyTrash(in root: URL) throws {
+        let fm = FileManager.default
+        let desktop = root.appendingPathComponent("Trash Desktop", isDirectory: true)
+        let mappedRoot = root.appendingPathComponent("Trash Mapped Folder", isDirectory: true)
+        for folder in [desktop, mappedRoot] {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+        }
+        let regular = desktop.appendingPathComponent("Fange-trash-fixture-\(UUID()).txt")
+        let untouched = desktop.appendingPathComponent("Unselected.txt")
+        let alias = desktop.appendingPathComponent("Fange-trash-fixture-\(UUID()).app")
+        let mappedFile = mappedRoot.appendingPathComponent("Fange-trash-fixture-\(UUID()).txt")
+        for source in [regular, untouched, mappedFile] { try Data("fixture".utf8).write(to: source) }
+        try URL.writeBookmarkData(untouched.bookmarkData(options: .suitableForBookmarkFile,
+            includingResourceValuesForKeys: nil, relativeTo: nil), to: alias)
+
+        let frame = NSRect(x: -5000, y: -5000, width: 400, height: 420)
+        var region = Region.defaultNewRegion(frame: frame)
+        region.itemBindings = [regular, untouched, alias].enumerated().map {
+            RegionItemBinding(path: $1.path, slotIndex: $0)
+        }
+        var mapped = Region.defaultNewRegion(frame: frame.offsetBy(dx: 500, dy: 0))
+        mapped.mappedFolderPath = mappedRoot.path
+        mapped.displayMode = .list
+        let store = RegionStore(fileURL: root.appendingPathComponent("trash-regions.json"))
+        store.replace(with: [region, mapped])
+        let visibility = DesktopItemVisibility(journalURL: root.appendingPathComponent("trash-hidden.json"), desktopURL: desktop)
+        let app = AppDelegate(store: store, desktopVisibility: visibility)
+        app.endFileDrag(regionID: region.id, urls: [], operation: [])
+        check(isHidden(regular) && isHidden(alias), "bound files start hidden by Fange")
+        check(!app.trashFiles([mappedFile], in: region.id), "an unbound path cannot be trashed through an ordinary region")
+        check(app.trashFiles([regular, alias], in: region.id), "ordinary region accepts a multi-item trash operation")
+        waitUntil("trash removes only the selected files and bindings; the Finder alias target remains") {
+            store.region(id: region.id)?.itemBindings == [region.itemBindings[1]] &&
+                !fm.fileExists(atPath: regular.path) && !fm.fileExists(atPath: alias.path) &&
+                fm.fileExists(atPath: untouched.path)
+        }
+        app.undoLastAction()
+        waitUntil("undo restores the trashed files, Finder alias and original slots") {
+            store.region(id: region.id)?.itemBindings == region.itemBindings &&
+                isHidden(regular) && isHidden(alias)
+        }
+        let restoredValues = try alias.resourceValues(forKeys: [.isAliasFileKey])
+        check(restoredValues.isAliasFile == true, "the restored item remains a Finder alias")
+
+        check(app.trashFiles([mappedFile], in: mapped.id), "mapped list accepts trash for an authorized child")
+        waitUntil("the mapped file leaves its original location") {
+            !fm.fileExists(atPath: mappedFile.path)
+        }
+        // The filesystem move can finish before its main-thread completion records the undo.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        app.undoLastAction()
+        waitUntil("undo restores the mapped file to its folder") { fm.fileExists(atPath: mappedFile.path) }
+        try visibility.restoreAll()
     }
 
     private static func verifyQuitRecovery(in root: URL) throws {

@@ -25,6 +25,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
     var onSortChanged: ((UUID, RegionFileSort) -> Void)?
     var onCollapseRequested: ((UUID) -> Void)?
     var onFilesCopied: (([URL]) -> Void)?
+    var onFilesTrashed: ((UUID, [URL]) -> Void)?
     var onFilesDragStarted: (([URL]) -> Void)?
     var onFilesDragMoved: ((NSPoint) -> Void)?
     var onFilesRevealRequested: (([URL]) -> Void)?
@@ -147,6 +148,10 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
             return self.onFilesDropped?(self.region.id, urls, self.interactionWindow.convertPoint(toScreen: point), folder, operation) ?? false
         }
         filesView.onCopy = { [weak self] in self?.onFilesCopied?($0) }
+        filesView.onTrash = { [weak self] urls in
+            guard let self else { return }
+            self.onFilesTrashed?(self.region.id, urls)
+        }
         filesView.onSortChanged = { [weak self] options in
             guard let self else { return }; self.onSortChanged?(self.region.id, options)
         }

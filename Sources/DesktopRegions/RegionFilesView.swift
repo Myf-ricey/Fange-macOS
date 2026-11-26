@@ -186,6 +186,7 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate, QLPr
     var onRevealEnded: (([URL]) -> Void)?
     var onRename: ((URL, String) -> Void)?
     var onCopy: (([URL]) -> Void)?
+    var onTrash: (([URL]) -> Void)?
     var onDragEnded: (([URL], NSDragOperation) -> Void)?
     var onDropPreview: ((Bool) -> Void)?
     private(set) var selectedPaths = Set<String>()
@@ -565,6 +566,11 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate, QLPr
                 menu.addItem(NSSharingServicePicker(items: [url]).standardShareMenuItem)
             }
             menu.addItem(withTitle: "在访达中显示", action: #selector(revealContext), keyEquivalent: "").target = self
+            if onTrash != nil {
+                let trash = menu.addItem(withTitle: "移到废纸篓", action: #selector(trashContext(_:)), keyEquivalent: "")
+                trash.target = self
+                trash.representedObject = items
+            }
             menu.addItem(.separator())
         } else { contextURL = nil }
         if desktopLayout == nil {
@@ -602,6 +608,11 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate, QLPr
     @objc private func renameContext() { if let url = contextURL { beginRename(url) } }
     @objc private func copyContext(_ sender: NSMenuItem) {
         if let items = sender.representedObject as? [URL] { copyFiles(items) }
+    }
+
+    @objc private func trashContext(_ sender: NSMenuItem) {
+        guard let items = sender.representedObject as? [URL], !items.isEmpty else { return }
+        onTrash?(items)
     }
 
     private func copyFiles(_ items: [URL]) {
