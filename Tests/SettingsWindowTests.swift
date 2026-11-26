@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Cocoa
+import Darwin
 
 @main
 struct SettingsWindowTests {
@@ -79,7 +80,144 @@ struct SettingsWindowTests {
         settings.showAdvancedSettings(for: extraRegions[0].id)
         let reopened = NSApp.windows.first { $0.title == "\(extraRegions[0].name) · 更多设置" }!
         check(reopened.frame.size == listEditor.frame.size, "the next resize is saved after switching regions")
-        print("Settings window resize tests passed.")
+
+        try verifyGridOverflow(in: root)
+        print("Settings window resize, grid overflow and drop tests passed.")
+    }
+
+    private static func verifyGridOverflow(in root: URL) throws {
+        let desktop = root.appendingPathComponent("Desktop", isDirectory: true)
+        try FileManager.default.createDirectory(at: desktop, withIntermediateDirectories: true)
+        let layoutURL = root.appendingPathComponent("grid.json")
+        let journalURL = root.appendingPathComponent("grid-hidden.json")
+        let store = RegionStore(fileURL: layoutURL)
+        let visibility = DesktopItemVisibility(journalURL: journalURL, desktopURL: desktop)
+        var region = Region.defaultNewRegion(frame: NSRect(x: 100, y: 100, width: 400, height: 500))
+        region.gridRows = 4
+        for index in 0..<8 {
+            let url = desktop.appendingPathComponent(index == 7 ? "CC Switch" : "App \(index)")
+            try Data().write(to: url)
+            region.itemBindings.append(RegionItemBinding(path: url.path, slotIndex: index))
+        }
+        store.replace(with: [region])
+        try visibility.synchronize(regions: [region])
+        let originalLayout = try Data(contentsOf: layoutURL)
+        let originalJournal = try Data(contentsOf: journalURL)
+
+        var acceptsOverflow = false
+        var prompts: [(String, String)] = []
+        let delegate = AppDelegate(store: store, desktopVisibility: visibility) { title, message in
+            prompts.append((title, message))
+            return acceptsOverflow
+        }
+        delegate.openAdvancedSettings(for: region.id)
+        let editor = NSApp.windows.first { $0.title == "\(region.name) · 更多设置" && $0.isVisible }!
+        let controls = descendants(of: editor.contentView!)
+        let rows = controls.compactMap { $0 as? NSStepper }.first { $0.action == NSSelectorFromString("rowsChanged") }!
+        let reset = controls.compactMap { $0 as? NSButton }.first { $0.title == "恢复默认参数" }!
+
+        rows.integerValue = 3
+        rows.sendAction(rows.action, to: rows.target)
+        check(store.region(id: region.id) == region, "changing 2×4 to 2×3 must preserve all eight bindings and the old frame")
+        check(rows.integerValue == 4, "rejected row stepper returns to the saved value")
+        check(prompts.count == 1 && prompts[0].0.contains("2 个项目") && prompts[0].1.contains("6 个项目"),
+              "the warning explains how many items will remain visible and how many will scroll")
+
+        reset.sendAction(reset.action, to: reset.target)
+        check(store.region(id: region.id) == region, "resetting to the default 2×3 grid must reject the entire change")
+        let savedLayout = try Data(contentsOf: layoutURL)
+        let savedJournal = try Data(contentsOf: journalURL)
+        check(savedLayout == originalLayout && savedJournal == originalJournal,
+              "rejected changes never rewrite the saved region or visibility journal")
+        var info = stat()
+        check(lstat(region.itemBindings[7].path, &info) == 0 && (info.st_flags & UInt32(UF_HIDDEN)) != 0,
+              "the last bound icon stays in the region and Finder keeps its original hidden")
+
+        acceptsOverflow = true
+        rows.integerValue = 3
+        rows.sendAction(rows.action, to: rows.target)
+        let resized = store.region(id: region.id)!
+        check(resized.gridRows == 3 && resized.gridColumns == 2 && resized.hasGridOverflow,
+              "confirming a shrink keeps two columns and extends the three visible rows")
+        check(resized.itemBindings == region.itemBindings && RegionStore(fileURL: layoutURL).region(id: region.id) == resized,
+              "all eight items and their extension persist after reloading the saved layout")
+
+        var scrolling = resized
+        scrolling.name = "Overflow scrolling"
+        scrolling.setFrame(resized.frame.offsetBy(dx: -6000, dy: -6000))
+        let controller = RegionWindowController(region: scrolling, editMode: false)
+        defer { controller.close() }
+        let overlay = NSApp.windows.first { $0.title == "\(scrolling.name) 编辑层" }!
+        let scroll = overlay.contentView!.subviews.compactMap { $0 as? RegionFileScrollView }.first!
+        let files = scroll.documentView as! RegionFilesView
+        let desktopLayout = files.desktopLayout!
+        let centers = region.itemBindings.map { desktopLayout.centers[$0.path]! }
+        let visible = scroll.contentView.bounds
+        check(scroll.hasVerticalScroller && centers.indices.filter { visible.contains(centers[$0]) } == Array(0..<6),
+              "the viewport shows exactly six of the eight bound icons")
+        check(centers[6].x == centers[0].x && centers[7].x == centers[1].x && centers[6].y == centers[7].y,
+              "the extension uses the same columns and a new row")
+        files.scroll(NSPoint(x: 0, y: files.bounds.height - visible.height))
+        check(scroll.contentView.bounds.contains(centers[6]) && scroll.contentView.bounds.contains(centers[7]),
+              "scrolling reaches both extra icons")
+
+        var filled = resized
+        filled.itemBindings = Array(resized.itemBindings.prefix(6))
+        filled.allowsGridOverflow = false
+        filled.allowsCollapse = false
+        store.update(filled)
+        let incoming = [desktop.appendingPathComponent("Next App"), desktop.appendingPathComponent("Another App")]
+        for url in incoming { try Data().write(to: url) }
+        let point = NSPoint(x: filled.frame.midX, y: filled.frame.midY)
+        acceptsOverflow = false
+        check(!delegate.filesDropped(incoming, into: filled.id, near: point, folder: nil) &&
+              store.region(id: filled.id) == filled && incoming.allSatisfy {
+                  FileManager.default.fileExists(atPath: $0.path)
+              }, "declining a drop into a full partition preserves the partition and the sources")
+        check(prompts.last?.0.contains("可见位置已满") == true && prompts.last?.1.contains("2 个项目") == true,
+              "the full-drop alert explains that both incoming items will be below the visible grid")
+        acceptsOverflow = true
+        check(delegate.filesDropped(incoming, into: filled.id, near: point, folder: nil),
+              "confirming a drop enables scrolling even for a partition using native Finder icons")
+        let withDrop = store.region(id: filled.id)!
+        check(withDrop.itemBindings.suffix(2).map(\.slotIndex) == [6, 7] &&
+              withDrop.itemBindings.suffix(2).map(\.path) == incoming.map(\.path) &&
+              withDrop.gridCapacity == 6 && withDrop.rendersBoundIcons,
+              "both new items append to the extension without changing the visible grid")
+        acceptsOverflow = false
+        let promptsAfterDrop = prompts.count
+        check(delegate.filesDropped(incoming, into: filled.id, near: point, folder: nil) &&
+              prompts.count == promptsAfterDrop && store.region(id: filled.id) == withDrop,
+              "moving the same items within the extension does not prompt again")
+
+        var sparse = store.region(id: region.id)!
+        sparse.gridRows = 4
+        sparse.itemBindings = [region.itemBindings[0], region.itemBindings[7]]
+        store.update(sparse)
+        let promptCount = prompts.count
+        rows.integerValue = 3
+        rows.sendAction(rows.action, to: rows.target)
+        let compact = store.region(id: region.id)!
+        check(compact.gridRows == 3 && compact.itemBindings.map(\.path) == sparse.itemBindings.map(\.path) &&
+              compact.itemBindings.map(\.slotIndex) == [0, 1] && prompts.count == promptCount,
+              "a shrink with sufficient capacity relocates a sparse binding without asking")
+        store.update(resized)
+        let shortFrame = NSRect(x: resized.frame.minX, y: resized.frame.maxY - 240,
+                                width: resized.frame.width, height: 240)
+        acceptsOverflow = false
+        delegate.regionFrameChanged(id: resized.id, frame: shortFrame)
+        check(store.region(id: resized.id) == resized, "declining a manual shrink preserves the frame and grid")
+        acceptsOverflow = true
+        delegate.regionFrameChanged(id: resized.id, frame: shortFrame)
+        check(store.region(id: resized.id)?.frame == shortFrame &&
+              store.region(id: resized.id)?.gridColumns == 2 && store.region(id: resized.id)?.gridRows == 2 &&
+              store.region(id: resized.id)?.itemBindings == resized.itemBindings,
+              "a confirmed manual shrink reduces visible rows and preserves all items and columns")
+        delegate.regionFrameChanged(id: resized.id, frame: resized.frame)
+        check(store.region(id: resized.id)?.gridRows == 4 && store.region(id: resized.id)?.hasGridOverflow == false,
+              "growing the partition makes the rows visible again")
+        editor.close()
+        delegate.settingsWindow?.close()
     }
 
     private static func descendants(of view: NSView) -> [NSView] {

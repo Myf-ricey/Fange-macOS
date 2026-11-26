@@ -208,6 +208,22 @@ enum RegionLayout {
         )
     }
 
+    static func rowsFittingHeight(_ height: CGFloat, in region: Region) -> Int {
+        let currentRows = min(12, max(1, region.gridRows))
+        let growing = height > region.frame.height
+        var rows = currentRows
+        if growing && region.hasGridOverflow {
+            let columns = min(12, max(1, region.gridColumns))
+            rows = min(12, (region.boundItemCount + columns - 1) / columns)
+        }
+        let minimumRows = growing ? currentRows : 1
+        while rows > minimumRows, height < minimumRegionSize(columns: region.gridColumns, rows: rows,
+                                                              headerHeight: CGFloat(region.headerHeight)).height {
+            rows -= 1
+        }
+        return rows
+    }
+
     static func globalSlotCenters(in region: Region) -> [NSPoint] {
         if region.usesMacGridGeometry {
             return macGridSlotCenters(in: region, metrics: .current())

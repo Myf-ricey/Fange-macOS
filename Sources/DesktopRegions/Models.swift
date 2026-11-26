@@ -257,7 +257,7 @@ enum RegionBindingPolicy {
         in region: Region,
         excludingPaths: Set<String>
     ) -> Set<Int> {
-        let capacity = min(12, max(1, region.gridColumns)) * min(12, max(1, region.gridRows))
+        let capacity = region.bindingCapacity
         return Set(region.itemBindings.compactMap { binding -> Int? in
             guard binding.isExplicit,
                   !excludingPaths.contains(binding.path),
@@ -375,6 +375,7 @@ struct Region: Codable, Identifiable, Equatable {
     var gridRows: Int
     var iconSpacing: Double
     var itemBindings: [RegionItemBinding]
+    var allowsGridOverflow: Bool
     var mappedFolderPath: String?
     var mappedFolderBookmark: Data?
     var allowsCollapse: Bool
@@ -382,11 +383,15 @@ struct Region: Codable, Identifiable, Equatable {
     var displayMode: RegionDisplayMode
     var fileSort: RegionFileSort
 
+    var gridCapacity: Int { min(12, max(1, gridColumns)) * min(12, max(1, gridRows)) }
+    var boundItemCount: Int { Set(itemBindings.lazy.filter(\.isExplicit).map(\.path)).count }
+    var bindingCapacity: Int { allowsGridOverflow ? max(gridCapacity, boundItemCount) : gridCapacity }
+    var hasGridOverflow: Bool { bindingCapacity > gridCapacity }
     var isMapped: Bool { mappedFolderPath != nil }
     var presentsOwnFiles: Bool { isMapped || displayMode == .list }
     // Preserve the desktop grid geometry while letting one retained app view
     // own visibility. Finder must not hide/unhide these icons on each toggle.
-    var rendersBoundIcons: Bool { !isMapped && displayMode == .icons && allowsCollapse }
+    var rendersBoundIcons: Bool { !isMapped && displayMode == .icons && (allowsCollapse || allowsGridOverflow) }
     var ownsFileSurface: Bool { presentsOwnFiles || rendersBoundIcons }
     var hidesDesktopItems: Bool { !isMapped && (ownsFileSurface || isCollapsed) }
 
@@ -416,6 +421,7 @@ struct Region: Codable, Identifiable, Equatable {
         gridRows: Int = 3,
         iconSpacing: Double = 96,
         itemBindings: [RegionItemBinding] = [],
+        allowsGridOverflow: Bool = false,
         mappedFolderPath: String? = nil,
         mappedFolderBookmark: Data? = nil,
         allowsCollapse: Bool = true,
@@ -451,6 +457,7 @@ struct Region: Codable, Identifiable, Equatable {
         self.gridRows = gridRows
         self.iconSpacing = iconSpacing
         self.itemBindings = itemBindings
+        self.allowsGridOverflow = allowsGridOverflow
         self.mappedFolderPath = mappedFolderPath
         self.mappedFolderBookmark = mappedFolderBookmark
         self.allowsCollapse = allowsCollapse
@@ -466,7 +473,7 @@ struct Region: Codable, Identifiable, Equatable {
         case macGridBottomExtension
         case headerWidthFraction, headerHeight, titleFontSize, titleColorHex, titleFontWeight
         case headerStyle, surfaceStyle
-        case gridColumns, gridRows, iconSpacing, itemBindings
+        case gridColumns, gridRows, iconSpacing, itemBindings, allowsGridOverflow
         case mappedFolderPath, mappedFolderBookmark, allowsCollapse, isCollapsed, displayMode, fileSort
     }
 
@@ -504,6 +511,7 @@ struct Region: Codable, Identifiable, Equatable {
         surfaceStyle = try container.decodeIfPresent(RegionSurfaceStyle.self, forKey: .surfaceStyle) ?? .macNative
         gridColumns = try container.decodeIfPresent(Int.self, forKey: .gridColumns) ?? 2
         gridRows = try container.decodeIfPresent(Int.self, forKey: .gridRows) ?? 3
+        allowsGridOverflow = try container.decodeIfPresent(Bool.self, forKey: .allowsGridOverflow) ?? false
         iconSpacing = try container.decodeIfPresent(Double.self, forKey: .iconSpacing) ?? 96
         itemBindings = try container.decodeIfPresent([RegionItemBinding].self, forKey: .itemBindings) ?? []
         mappedFolderPath = try container.decodeIfPresent(String.self, forKey: .mappedFolderPath)

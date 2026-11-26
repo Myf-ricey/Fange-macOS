@@ -9,15 +9,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     let store: RegionStore
+    private let overflowConfirmation: ((String, String) -> Bool)?
+    private var isConfirmingOverflow = false
 
     init(
         store: RegionStore = RegionStore(),
         desktopVisibility: DesktopItemVisibility = DesktopItemVisibility(),
-        workspaceRecovery: WorkspaceRecovery = WorkspaceRecovery()
+        workspaceRecovery: WorkspaceRecovery = WorkspaceRecovery(),
+        overflowConfirmation: ((String, String) -> Bool)? = nil
     ) {
         self.store = store
         self.desktopVisibility = desktopVisibility
         self.workspaceRecovery = workspaceRecovery
+        self.overflowConfirmation = overflowConfirmation
         super.init()
     }
     private var regionWindows: [UUID: RegionWindowController] = [:]
@@ -213,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func undoLastAction() {
-        guard !fileMoveInProgress, let step = undoHistory.nextStep else { return }
+        guard !fileMoveInProgress, !isConfirmingOverflow, let step = undoHistory.nextStep else { return }
         guard !step.fileMoves.isEmpty else { applyWorkspaceUndo(step); return }
         let destinations = Set(step.fileMoves.map(\.destination))
         do { try desktopVisibility.restore(paths: destinations) }
@@ -378,40 +382,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ mutation: (inout Region) -> Void
     ) {
         guard canChangeWorkspace(), let previous = store.region(id: id) else { return }
+        var updated = previous
+        mutation(&updated)
+        if !updated.isMapped, updated.gridCapacity < previous.gridCapacity,
+           updated.boundItemCount > updated.gridCapacity {
+            let extra = updated.boundItemCount - updated.gridCapacity
+            let title = "缩小后会有 \(extra) 个项目需要滚动查看"
+            let message = "新网格可同时显示 \(updated.gridCapacity) 个项目。其余项目会排在分区下方，向下滚动即可查看。"
+            guard confirmGridOverflow(title, message: message), store.region(id: id) == previous else {
+                if let current = store.region(id: id) {
+                    regionWindows[id]?.update(with: current)
+                    settingsWindow?.updateAdvancedEditor(current)
+                }
+                return
+            }
+            updated.allowsGridOverflow = true
+        }
         let undoSnapshot = makeWorkspaceSnapshot()
         let metrics = FinderDesktopGridMetrics.current()
         let occupiedFrames = store.regions
             .filter { $0.id != id }
             .map { RegionLayout.visualCollisionFrame(for: $0, metrics: metrics) }
-        store.mutate(id: id) { region in
-            mutation(&region)
-            region.usesMacDefaultGrid = self.usesMacDefaultGrid
-            if MacDefaultGridPreferencePolicy.shouldExitPreservedGeometry(
-                previous: previous,
-                updated: region
-            ) {
-                region.preservesMacGridGeometry = false
-            }
-            normalizeBindings(in: &region)
-            if region.usesMacDefaultGrid && !region.presentsOwnFiles {
-                let screen = self.screen(containing: region.frame) ?? NSScreen.main ?? NSScreen.screens.first
-                if let screen {
-                    region.setFrame(RegionLayout.snappedMacGridFrame(
-                        near: region.frame,
-                        region: region,
-                        visibleFrame: screen.visibleFrame,
-                        metrics: metrics,
-                        avoiding: occupiedFrames
-                    ))
-                }
-            }
+        updated.usesMacDefaultGrid = usesMacDefaultGrid
+        if MacDefaultGridPreferencePolicy.shouldExitPreservedGeometry(previous: previous, updated: updated) {
+            updated.preservesMacGridGeometry = false
         }
-        guard let updated = store.region(id: id) else { return }
+        normalizeBindings(in: &updated)
+        if updated.usesMacDefaultGrid, !updated.presentsOwnFiles,
+           let screen = screen(containing: updated.frame) ?? NSScreen.main ?? NSScreen.screens.first {
+            updated.setFrame(RegionLayout.snappedMacGridFrame(
+                near: updated.frame,
+                region: updated,
+                visibleFrame: screen.visibleFrame,
+                metrics: metrics,
+                avoiding: occupiedFrames
+            ))
+        }
+        store.update(updated)
         let presentationChanged = previous.hidesDesktopItems != updated.hidesDesktopItems ||
             previous.itemBindings != updated.itemBindings || previous.fileSort != updated.fileSort ||
             previous.mappedFolderPath != updated.mappedFolderPath || previous.mappedFolderBookmark != updated.mappedFolderBookmark
         guard !presentationChanged || synchronizeFilePresentation() else {
-            store.mutate(id: id) { $0 = previous }
+            store.update(previous)
             _ = synchronizeFilePresentation()
             settingsWindow?.updateRegionRow(previous)
             settingsWindow?.updateAdvancedEditor(previous)
@@ -669,8 +681,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    private func regionFrameChanged(id: UUID, frame: NSRect) {
+    func regionFrameChanged(id: UUID, frame: NSRect) {
+        guard let previous = store.region(id: id), frame != previous.frame else { return }
         mutateRegion(id: id, actionName: "移动或缩放分区") { region in
+            if !region.presentsOwnFiles, !region.usesMacDefaultGrid, frame.height != previous.frame.height {
+                region.gridRows = RegionLayout.rowsFittingHeight(frame.height, in: region)
+            }
             region.setFrame(frame)
         }
     }
@@ -801,20 +817,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let sources = FolderFileOperations.topLevelSources(urls)
         let movingPaths: Set<String> = copying ? [] : Set(sources.filter(isDesktopURL).map(\.path))
-        var occupied = occupiedSlotIndices(in: region, excludingPaths: movingPaths)
-        var slotIndices: [Int] = []
-        for _ in sources {
-            guard let slot = RegionLayout.nearestAvailableSlot(
-                to: globalPoint,
-                in: region,
-                excluding: occupied
-            ) else {
-                showError(noFreeSlotError(for: region))
-                return false
-            }
-            occupied.insert(slot)
-            slotIndices.append(slot)
-        }
+        guard let slotIndices = slotsForDrop(in: region, near: Array(repeating: globalPoint, count: sources.count),
+                                             excludingPaths: movingPaths) else { return false }
         let desktop = desktopVisibility.desktopURL
         if copying {
             do {
@@ -870,18 +874,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ items: [FinderDesktopItem],
         previousItems: [FinderDesktopItem]
     ) {
-        guard !isPreparingToQuit,
+        guard !isPreparingToQuit, !isConfirmingOverflow,
               let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let undoSnapshot = makeWorkspaceSnapshot(finderItems: previousItems)
         let movingPaths = Set(items.map { $0.url.standardizedFileURL.path })
-        let temporarilyReleasedPaths = dragAvailabilityState.excludedPaths(
-            selectedPaths: movingPaths
-        )
-        var occupiedByRegion = Dictionary(uniqueKeysWithValues: store.regions.map {
-            ($0.id, occupiedSlotIndices(in: $0, excludingPaths: temporarilyReleasedPaths))
-        })
-        var placements: [UUID: [(item: FinderDesktopItem, slotIndex: Int)]] = [:]
+        var placements: [UUID: [(item: FinderDesktopItem, point: NSPoint)]] = [:]
         var pathsToUnbind = Set<String>()
+        var rejectedPaths = Set<String>()
 
         for item in items {
             let path = item.url.standardizedFileURL.path
@@ -899,24 +898,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
             if region.isCollapsed { continue }
-            let occupied = occupiedByRegion[region.id] ?? []
-            guard let slotIndex = RegionLayout.nearestAvailableSlot(
-                to: globalPoint,
-                in: region,
-                excluding: occupied
-            ) else {
-                showError(noFreeSlotError(for: region))
-                continue
-            }
-            occupiedByRegion[region.id, default: []].insert(slotIndex)
-            placements[region.id, default: []].append((item, slotIndex))
+            placements[region.id, default: []].append((item, globalPoint))
         }
 
-        var successfulPlacements: [(regionID: UUID, urls: [URL], slots: [Int])] = []
+        var assignedItems = false
         for (regionID, values) in placements {
             guard let region = store.region(id: regionID) else { continue }
             let urls = values.map(\.item.url)
-            let slots = values.map(\.slotIndex)
+            let paths = Set(urls.map { $0.standardizedFileURL.path })
+            guard let slots = slotsForDrop(in: region, near: values.map(\.point), excludingPaths: paths) else {
+                rejectedPaths.formUnion(paths)
+                continue
+            }
             if let error = moveDesktopItemsProgrammatically(
                 urls,
                 toSlotIndices: slots,
@@ -926,21 +919,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if !DesktopArranger.isMissingItemError(error) { showError(error) }
                 continue
             }
-            successfulPlacements.append((regionID, urls, slots))
+            commitBindings(regionID: regionID, urls: urls, slotIndices: slots)
+            assignedItems = true
             regionWindows[regionID]?.showDropFeedback()
             settingsWindow?.setStatus("已将 \(urls.count) 个桌面图标吸附到“\(region.name)”")
         }
 
-        let placedPaths = Set(successfulPlacements.flatMap { $0.urls.map { $0.standardizedFileURL.path } })
-        pathsToUnbind.subtract(placedPaths)
+        let rejectedPositions = previousItems.filter { rejectedPaths.contains($0.url.standardizedFileURL.path) }
+            .map(DesktopIconPosition.init(item:))
+        if !rejectedPositions.isEmpty,
+           let error = restoreDesktopIconPositionsProgrammatically(rejectedPositions) {
+            settingsWindow?.setStatus(error.localizedDescription)
+        }
         if !pathsToUnbind.isEmpty {
             removeBindings(forPaths: pathsToUnbind)
             settingsWindow?.setStatus("已解除 \(pathsToUnbind.count) 个桌面图标与分区的绑定")
         }
-        for placement in successfulPlacements {
-            commitBindings(regionID: placement.regionID, urls: placement.urls, slotIndices: placement.slots)
-        }
-        if !successfulPlacements.isEmpty || !pathsToUnbind.isEmpty {
+        if assignedItems || !pathsToUnbind.isEmpty {
             recordUndoStep(title: "移动桌面图标", snapshot: undoSnapshot)
         }
         dragAvailabilityState.confirm(paths: movingPaths)
@@ -1167,8 +1162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selectedPaths: excludingPaths
         )
         for region in store.regions {
-            let capacity = min(12, max(1, region.gridColumns)) * min(12, max(1, region.gridRows))
-            let allSlots = Set(0..<capacity)
+            let allSlots = Set(0..<region.gridCapacity)
             let occupied = occupiedSlotIndices(in: region, excludingPaths: effectiveExcludedPaths)
             regionWindows[region.id]?.setAvailableSlots(allSlots.subtracting(occupied))
         }
@@ -1183,10 +1177,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func commitBindings(regionID: UUID, urls: [URL], slotIndices: [Int]) {
         let paths = Set(urls.map { $0.standardizedFileURL.path })
         var regions = store.regions
-        for index in regions.indices {
-            regions[index].itemBindings.removeAll { paths.contains($0.path) }
-        }
         guard let targetIndex = regions.firstIndex(where: { $0.id == regionID }) else { return }
+        for index in regions.indices {
+            let previousCount = regions[index].itemBindings.count
+            regions[index].itemBindings.removeAll { paths.contains($0.path) }
+            if index != targetIndex, regions[index].allowsGridOverflow,
+               previousCount != regions[index].itemBindings.count {
+                normalizeBindings(in: &regions[index])
+            }
+        }
+        if slotIndices.contains(where: { $0 >= regions[targetIndex].gridCapacity }) {
+            regions[targetIndex].allowsGridOverflow = true
+        }
         for (url, slotIndex) in zip(urls, slotIndices) {
             regions[targetIndex].itemBindings.append(
                 RegionItemBinding(path: url.standardizedFileURL.path, slotIndex: slotIndex)
@@ -1204,7 +1206,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for index in regions.indices {
             let oldCount = regions[index].itemBindings.count
             regions[index].itemBindings.removeAll { paths.contains($0.path) }
-            changed = changed || oldCount != regions[index].itemBindings.count
+            if oldCount != regions[index].itemBindings.count {
+                changed = true
+                if regions[index].allowsGridOverflow { normalizeBindings(in: &regions[index]) }
+            }
         }
         guard changed else { return }
         store.replace(with: regions)
@@ -1212,7 +1217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func normalizeBindings(in region: inout Region) {
-        let capacity = min(12, max(1, region.gridColumns)) * min(12, max(1, region.gridRows))
+        let capacity = region.bindingCapacity
         var usedSlots = Set<Int>()
         var seenPaths = Set<String>()
         var normalized: [RegionItemBinding] = []
@@ -1283,12 +1288,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       !desktopAvailable || !FolderFileOperations.entryIsMissing(at: url) else { return nil }
                 return RegionItemBinding(path: path, slotIndex: binding.slotIndex, isExplicit: binding.isExplicit)
             }
-            let capacity = min(12, max(1, regions[index].gridColumns)) * min(12, max(1, regions[index].gridRows))
+            let capacity = regions[index].bindingCapacity
             regions[index].itemBindings = RegionBindingPolicy.validBindings(
                 bindings,
                 existingPaths: Set(bindings.map(\.path)),
                 capacity: capacity
             )
+            if regions[index].allowsGridOverflow { normalizeBindings(in: &regions[index]) }
         }
         if regions != store.regions {
             store.replace(with: regions)
@@ -1367,7 +1373,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) -> Error? {
         // Managed file layers move their cached cells immediately. Finder
         // positioning is only needed for a region displaying native icons.
-        guard !region.ownsFileSurface else { return nil }
+        guard !region.ownsFileSurface, !slotIndices.contains(where: { $0 >= region.gridCapacity }) else { return nil }
         let targets = RegionLayout.finderIconPositions(
             in: region,
             screenFrame: screen.frame,
@@ -1430,12 +1436,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func noFreeSlotError(for region: Region) -> Error {
-        NSError(
-            domain: "DesktopRegions",
-            code: 1005,
-            userInfo: [NSLocalizedDescriptionKey: "“\(region.name)”没有空余位置，请增加网格行列数后再试。"]
-        )
+    private func slotsForDrop(in region: Region, near points: [NSPoint], excludingPaths: Set<String>) -> [Int]? {
+        var occupied = occupiedSlotIndices(in: region, excludingPaths: excludingPaths)
+        let capacity = region.gridCapacity
+        var nextOverflowSlot = capacity
+        let releasedOverflowCount = region.itemBindings.filter {
+            $0.isExplicit && $0.slotIndex >= capacity && excludingPaths.contains($0.path)
+        }.count
+        var overflowCount = 0
+        let slots = points.map { point in
+            if let slot = RegionLayout.nearestAvailableSlot(to: point, in: region, excluding: occupied) {
+                occupied.insert(slot)
+                return slot
+            }
+            while occupied.contains(nextOverflowSlot) { nextOverflowSlot += 1 }
+            let slot = nextOverflowSlot
+            nextOverflowSlot += 1
+            overflowCount += 1
+            return slot
+        }
+        let extra = overflowCount - releasedOverflowCount
+        if extra > 0 {
+            let title = "“\(region.name)”的可见位置已满"
+            let message = "继续放入后，\(extra) 个项目会排在分区下方，向下滚动即可查看。"
+            guard confirmGridOverflow(title, message: message), store.region(id: region.id) == region else { return nil }
+        }
+        return slots
+    }
+
+    private func confirmGridOverflow(_ title: String, message: String) -> Bool {
+        guard !isConfirmingOverflow else { return false }
+        isConfirmingOverflow = true
+        defer { isConfirmingOverflow = false }
+        if let overflowConfirmation { return overflowConfirmation(title, message) }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "没问题")
+        alert.addButton(withTitle: "那我再想想").keyEquivalent = "\u{1b}"
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     func requestFolderMapping(for id: UUID, from view: NSView) {
@@ -1680,6 +1721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func canChangeWorkspace() -> Bool {
+        guard !isConfirmingOverflow else { return false }
         guard fileMoveInProgress else { return true }
         settingsWindow?.setStatus("正在移动文件，完成后即可继续修改分区")
         settingsWindow?.refresh()

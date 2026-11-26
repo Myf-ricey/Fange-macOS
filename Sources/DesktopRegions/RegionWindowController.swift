@@ -298,7 +298,7 @@ final class RegionWindowController: NSWindowController, NSWindowDelegate {
             : NSRect(x: 6, y: 8, width: max(1, bounds.width - 12), height: max(1, expandedHeader.minY - 10))
         fileScrollView.isHidden = !region.ownsFileSurface || region.isCollapsed
         if fileScrollView.isHidden { filesView.clearSelection() }
-        fileScrollView.hasVerticalScroller = !region.rendersBoundIcons
+        fileScrollView.hasVerticalScroller = !region.rendersBoundIcons || region.hasGridOverflow
         filesView.desktopLayout = region.rendersBoundIcons
             ? BoundDesktopIconLayout(region: expanded, viewport: fileScrollView.frame) : nil
         filesView.editsRegionLayout = currentEditMode

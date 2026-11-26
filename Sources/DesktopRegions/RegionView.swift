@@ -188,7 +188,7 @@ final class RegionView: NSView {
                 dy: dy,
                 minimumSize: RegionLayout.minimumRegionSize(
                     columns: region.gridColumns,
-                    rows: region.gridRows,
+                    rows: region.presentsOwnFiles ? region.gridRows : 1,
                     headerHeight: CGFloat(region.headerHeight),
                     iconSpacing: CGFloat(region.iconSpacing)
                 )

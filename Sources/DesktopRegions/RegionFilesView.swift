@@ -46,20 +46,31 @@ struct BoundDesktopIconLayout: Equatable {
     let iconSize: CGFloat
     let labelWidth: CGFloat
     let textSize: CGFloat
+    let overflowHeight: CGFloat
 
     init(region: Region, viewport: NSRect, metrics: FinderDesktopGridMetrics = .current()) {
-        let slots = RegionLayout.globalSlotCenters(in: region)
-        centers = Dictionary(region.itemBindings.filter {
-            $0.isExplicit && slots.indices.contains($0.slotIndex)
-        }.map { binding in
-            let center = slots[binding.slotIndex]
-            return (binding.path, NSPoint(x: center.x - region.frame.minX - viewport.minX,
-                y: viewport.maxY - (center.y - region.frame.minY)))
-        }, uniquingKeysWith: { first, _ in first })
+        var slots = RegionLayout.globalSlotCenters(in: region).map {
+            NSPoint(x: $0.x - region.frame.minX - viewport.minX, y: viewport.maxY - ($0.y - region.frame.minY))
+        }
         iconSize = metrics.iconSize
-        labelWidth = max(iconSize + 12, min(140, region.frame.width / CGFloat(max(1, region.gridColumns))))
+        let columns = min(12, max(1, region.gridColumns))
+        labelWidth = max(iconSize + 12, min(140, region.frame.width / CGFloat(columns)))
         let settings = CFPreferencesCopyAppValue("DesktopViewSettings" as CFString, "com.apple.finder" as CFString) as? [String: Any]
         textSize = CGFloat((settings?["IconViewSettings"] as? [String: Any])?["textSize"] as? Double ?? 12)
+        if region.hasGridOverflow {
+            let columnCenters = slots.prefix(columns).map(\.x)
+            let pitch = max(metrics.pitch, iconSize + ceil(textSize * 2.6) + 16)
+            let firstY = max(viewport.height + iconSize / 2 + 6, (slots.last?.y ?? 0) + pitch)
+            for index in 0..<(region.bindingCapacity - region.gridCapacity) {
+                slots.append(NSPoint(x: columnCenters[index % columns], y: firstY + CGFloat(index / columns) * pitch))
+            }
+            overflowHeight = (slots.last?.y ?? 0) + iconSize / 2 + ceil(textSize * 2.6) + 16
+        } else {
+            overflowHeight = 0
+        }
+        centers = Dictionary(region.itemBindings.filter {
+            $0.isExplicit && slots.indices.contains($0.slotIndex)
+        }.map { ($0.path, slots[$0.slotIndex]) }, uniquingKeysWith: { first, _ in first })
     }
 
     func iconRect(for path: String) -> NSRect? {
@@ -76,11 +87,13 @@ struct BoundDesktopIconLayout: Equatable {
 
 final class RegionFileScrollView: NSScrollView {
     override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
         if let files = documentView as? RegionFilesView, files.editsRegionLayout,
-           files.desktopLayout != nil, !files.containsItem(at: files.convert(point, from: superview)) {
+           files.desktopLayout != nil, !(hit is NSScroller),
+           !files.containsItem(at: files.convert(point, from: superview)) {
             return nil
         }
-        return super.hitTest(point)
+        return hit
     }
 }
 
@@ -246,8 +259,8 @@ final class RegionFilesView: NSView, NSDraggingSource, NSTextFieldDelegate, QLPr
         }
         guard let clip = enclosingScrollView?.contentView else { return }
         let width = max(1, clip.bounds.width)
-        if desktopLayout != nil {
-            let size = NSSize(width: width, height: clip.bounds.height)
+        if let desktopLayout {
+            let size = NSSize(width: width, height: max(clip.bounds.height, desktopLayout.overflowHeight))
             if frame.size != size { setFrameSize(size) }
             return
         }
